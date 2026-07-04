@@ -3,8 +3,10 @@
 #include "http.h"
 #include "utils.h"
 #include <signal.h>
+#include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <unistd.h>
@@ -90,6 +92,61 @@ static size_t json_append_escaped_string(char *dst, size_t dst_size, const char 
   return off;
 }
 
+/* Appends formatted output to a dynamically-growing buffer, reallocating as
+ * needed. Returns 0 on success, -1 on formatting or allocation failure.
+ * (Mirrors configuration.c's out_append; kept local since these are separate
+ * translation units.) */
+static int json_out_append(char **out, size_t *out_cap, size_t *out_len, const char *fmt, ...) {
+  va_list args;
+  int needed;
+
+  va_start(args, fmt);
+  needed = vsnprintf(NULL, 0, fmt, args);
+  va_end(args);
+  if (needed < 0)
+    return -1;
+
+  if (*out_len + (size_t)needed + 1 > *out_cap) {
+    size_t new_cap = *out_cap * 2;
+    char *new_out;
+    while (new_cap < *out_len + (size_t)needed + 1)
+      new_cap *= 2;
+    new_out = realloc(*out, new_cap);
+    if (!new_out)
+      return -1;
+    *out = new_out;
+    *out_cap = new_cap;
+  }
+
+  va_start(args, fmt);
+  vsnprintf(*out + *out_len, *out_cap - *out_len, fmt, args);
+  va_end(args);
+  *out_len += (size_t)needed;
+  return 0;
+}
+
+/* Ensures at least `needed` bytes (beyond out_len) are available, growing the
+ * buffer if necessary. Used before writes that don't go through vsnprintf
+ * (json_append_escaped_string, raw single-character appends). Returns 0 on
+ * success, -1 on allocation failure. */
+static int json_out_ensure_cap(char **out, size_t *out_cap, size_t *out_len, size_t needed) {
+  if (*out_len + needed <= *out_cap)
+    return 0;
+
+  size_t new_cap = *out_cap * 2;
+  char *new_out;
+  while (new_cap < *out_len + needed)
+    new_cap *= 2;
+  new_out = realloc(*out, new_cap);
+  if (!new_out)
+    return -1;
+  *out = new_out;
+  *out_cap = new_cap;
+  return 0;
+}
+
+static void send_json_error(connection_t *c, int status, const char *message);
+
 /* Renders a single bind_addresses entry as the canonical string form used by
  * both the GET response and the "listen" form field (bare port, host:port,
  * [ipv6]:port, or an absolute Unix socket path). */
@@ -105,40 +162,74 @@ static void format_bind_address(bindaddr_t *ba, char *out, size_t out_size) {
   }
 }
 
-void handle_get_config(connection_t *c) {
-  static char buf[16384];
-  size_t off = 0;
+/* Appends a JSON-quoted, escaped copy of src to the dynamic buffer, growing
+ * it as needed first (json_append_escaped_string itself never grows). */
+static int json_out_append_escaped_string(char **out, size_t *out_cap, size_t *out_len, const char *src) {
+  size_t needed = strlen(src) * 2 + 3; /* worst case: every byte escaped, plus quotes + NUL */
+  if (json_out_ensure_cap(out, out_cap, out_len, needed) != 0)
+    return -1;
+  *out_len += json_append_escaped_string(*out + *out_len, *out_cap - *out_len, src);
+  return 0;
+}
 
-  off += snprintf(buf + off, sizeof(buf) - off, "{");
+void handle_get_config(connection_t *c) {
+  size_t out_cap = 4096;
+  size_t out_len = 0;
+  char *out = malloc(out_cap);
+
+  if (!out) {
+    send_json_error(c, STATUS_500, "Out of memory");
+    return;
+  }
+
+#define GC_APPEND(...)                                          \
+  do {                                                          \
+    if (json_out_append(&out, &out_cap, &out_len, __VA_ARGS__) != 0) { \
+      free(out);                                                \
+      send_json_error(c, STATUS_500, "Out of memory");          \
+      return;                                                   \
+    }                                                            \
+  } while (0)
+
+#define GC_APPEND_ESCAPED(str)                                          \
+  do {                                                                  \
+    if (json_out_append_escaped_string(&out, &out_cap, &out_len, (str)) != 0) { \
+      free(out);                                                        \
+      send_json_error(c, STATUS_500, "Out of memory");                  \
+      return;                                                           \
+    }                                                                    \
+  } while (0)
+
+  GC_APPEND("{");
 
   for (size_t i = 0; i < SETTING_FIELDS_COUNT; i++) {
     const setting_field_t *f = &SETTING_FIELDS[i];
     const char *base = (const char *)&config;
 
     if (i > 0)
-      buf[off++] = ',';
+      GC_APPEND(",");
 
-    off += snprintf(buf + off, sizeof(buf) - off, "\"%s\":", f->config_key);
+    GC_APPEND("\"%s\":", f->config_key);
 
     switch (f->type) {
     case FT_INT: {
       int v = *(const int *)(base + f->offset);
-      off += snprintf(buf + off, sizeof(buf) - off, "%d", v);
+      GC_APPEND("%d", v);
       break;
     }
     case FT_BOOL: {
       int v = *(const int *)(base + f->offset);
-      off += snprintf(buf + off, sizeof(buf) - off, "%s", v ? "true" : "false");
+      GC_APPEND("%s", v ? "true" : "false");
       break;
     }
     case FT_STRING: {
       const char *v = *(const char *const *)(base + f->offset);
-      off += json_append_escaped_string(buf + off, sizeof(buf) - off, v ? v : "");
+      GC_APPEND_ESCAPED(v ? v : "");
       break;
     }
     case FT_IFNAME: {
       const char *v = base + f->offset;
-      off += json_append_escaped_string(buf + off, sizeof(buf) - off, v);
+      GC_APPEND_ESCAPED(v);
       break;
     }
     }
@@ -150,12 +241,12 @@ void handle_get_config(connection_t *c) {
     if (config.fcc_listen_port_min > 0 && config.fcc_listen_port_max > 0) {
       snprintf(range, sizeof(range), "%d-%d", config.fcc_listen_port_min, config.fcc_listen_port_max);
     }
-    off += snprintf(buf + off, sizeof(buf) - off, ",\"fcc-listen-port-range\":");
-    off += json_append_escaped_string(buf + off, sizeof(buf) - off, range);
+    GC_APPEND(",\"fcc-listen-port-range\":");
+    GC_APPEND_ESCAPED(range);
   }
 
   /* listen: bind_addresses linked list rendered as canonical strings */
-  off += snprintf(buf + off, sizeof(buf) - off, ",\"listen\":[");
+  GC_APPEND(",\"listen\":[");
   {
     bindaddr_t *ba = bind_addresses;
     int first = 1;
@@ -163,17 +254,21 @@ void handle_get_config(connection_t *c) {
 
     while (ba) {
       if (!first)
-        buf[off++] = ',';
+        GC_APPEND(",");
       first = 0;
       format_bind_address(ba, line, sizeof(line));
-      off += json_append_escaped_string(buf + off, sizeof(buf) - off, line);
+      GC_APPEND_ESCAPED(line);
       ba = ba->next;
     }
   }
-  off += snprintf(buf + off, sizeof(buf) - off, "]}");
+  GC_APPEND("]}");
+
+#undef GC_APPEND
+#undef GC_APPEND_ESCAPED
 
   send_http_headers(c, STATUS_200, "application/json", NULL);
-  connection_queue_output_and_flush(c, (const uint8_t *)buf, off);
+  connection_queue_output_and_flush(c, (const uint8_t *)out, out_len);
+  free(out);
 }
 
 /* Rejects values containing raw newlines, which would corrupt the line-based
