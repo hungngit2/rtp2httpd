@@ -19,6 +19,7 @@ export default defineConfig(({ mode }) => {
         input: {
           status: resolve(__dirname, "status.html"),
           player: resolve(__dirname, "player.html"),
+          setting: resolve(__dirname, "setting.html"),
         },
       },
     },
