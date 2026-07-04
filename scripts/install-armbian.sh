@@ -12,7 +12,7 @@ CYAN='\033[0;36m'
 NC='\033[0m'
 
 # GitHub repository info (overridable via --repo-owner / --repo-url)
-REPO_OWNER="stackia"
+REPO_OWNER="hungngit2"
 REPO_NAME="rtp2httpd"
 SOURCE_REPO_URL=""
 
