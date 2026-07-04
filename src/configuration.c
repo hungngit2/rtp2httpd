@@ -9,6 +9,7 @@
 #include <getopt.h>
 #include <libgen.h>
 #include <net/if.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1723,15 +1724,51 @@ static int line_is_active_key(const char *line, const char *key) {
   return *p == '=' || *p == '\0';
 }
 
+/* Appends formatted output to a dynamically-growing buffer, reallocating as
+ * needed. Returns 0 on success, -1 on formatting or allocation failure. */
+static int out_append(char **out, size_t *out_cap, size_t *out_len, const char *fmt, ...) {
+  va_list args;
+  int needed;
+
+  va_start(args, fmt);
+  needed = vsnprintf(NULL, 0, fmt, args);
+  va_end(args);
+  if (needed < 0)
+    return -1;
+
+  if (*out_len + (size_t)needed + 1 > *out_cap) {
+    size_t new_cap = *out_cap * 2;
+    char *new_out;
+    while (new_cap < *out_len + (size_t)needed + 1)
+      new_cap *= 2;
+    new_out = realloc(*out, new_cap);
+    if (!new_out)
+      return -1;
+    *out = new_out;
+    *out_cap = new_cap;
+  }
+
+  va_start(args, fmt);
+  vsnprintf(*out + *out_len, *out_cap - *out_len, fmt, args);
+  va_end(args);
+  *out_len += (size_t)needed;
+  return 0;
+}
+
 int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size_t n_kvs,
                                   const char **listen_lines, size_t n_listen) {
   char *content;
+  size_t content_len;
   long size = 0;
   FILE *f = fopen(path, "r");
 
   if (f) {
     fseek(f, 0, SEEK_END);
     size = ftell(f);
+    if (size < 0) {
+      fclose(f);
+      return -1;
+    }
     fseek(f, 0, SEEK_SET);
     content = malloc((size_t)size + 1);
     if (!content) {
@@ -1744,11 +1781,13 @@ int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size
       return -1;
     }
     content[size] = '\0';
+    content_len = (size_t)size;
     fclose(f);
   } else {
     content = strdup("[global]\n");
     if (!content)
       return -1;
+    content_len = strlen(content);
   }
 
   int *applied = calloc(n_kvs > 0 ? n_kvs : 1, sizeof(int));
@@ -1766,11 +1805,23 @@ int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size
   }
   size_t out_len = 0;
 
+/* All OUT_APPEND call sites below run before `content`/`applied` are freed,
+ * so the cleanup is identical everywhere. */
+#define OUT_APPEND(...)                                                 \
+  do {                                                                  \
+    if (out_append(&out, &out_cap, &out_len, __VA_ARGS__) != 0) {       \
+      free(content);                                                    \
+      free(applied);                                                    \
+      free(out);                                                        \
+      return -1;                                                        \
+    }                                                                    \
+  } while (0)
+
   int in_global = 0, in_bind = 0, has_global = 0, has_bind = 0;
   /* Manual line splitting (not strtok_r): strtok_r treats runs of
    * consecutive delimiters as one, silently dropping blank lines, which
    * would violate byte-for-byte preservation of the rest of the file. */
-  char *content_end = content + strlen(content);
+  char *content_end = content + content_len;
   char *line = content;
 
   while (line < content_end) {
@@ -1786,16 +1837,16 @@ int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size
       if (in_global) {
         for (size_t i = 0; i < n_kvs; i++) {
           if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
-            out_len += snprintf(out + out_len, out_cap - out_len, "%s = %s\n", kvs[i].key, kvs[i].value);
+            OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
             applied[i] = 1;
           }
         }
       }
       if (in_bind) {
         for (size_t i = 0; i < n_listen; i++)
-          out_len += snprintf(out + out_len, out_cap - out_len, "%s\n", listen_lines[i]);
+          OUT_APPEND("%s\n", listen_lines[i]);
         if (n_listen == 0)
-          out_len += snprintf(out + out_len, out_cap - out_len, "* 5140\n");
+          OUT_APPEND("* 5140\n");
       }
 
       in_global = strncasecmp(t, "[global]", 8) == 0;
@@ -1805,7 +1856,7 @@ int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size
       if (in_bind)
         has_bind = 1;
 
-      out_len += snprintf(out + out_len, out_cap - out_len, "%s\n", line);
+      OUT_APPEND("%s\n", line);
       line = next_nl ? next_nl + 1 : content_end;
       continue;
     }
@@ -1821,7 +1872,7 @@ int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size
         if (line_is_active_key(t, kvs[i].key)) {
           matched = 1;
           if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
-            out_len += snprintf(out + out_len, out_cap - out_len, "%s = %s\n", kvs[i].key, kvs[i].value);
+            OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
           }
           applied[i] = 1;
           break;
@@ -1833,42 +1884,44 @@ int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size
       }
     }
 
-    out_len += snprintf(out + out_len, out_cap - out_len, "%s\n", line);
+    OUT_APPEND("%s\n", line);
     line = next_nl ? next_nl + 1 : content_end;
   }
 
   if (in_global) {
     for (size_t i = 0; i < n_kvs; i++) {
       if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
-        out_len += snprintf(out + out_len, out_cap - out_len, "%s = %s\n", kvs[i].key, kvs[i].value);
+        OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
         applied[i] = 1;
       }
     }
   }
   if (in_bind) {
     for (size_t i = 0; i < n_listen; i++)
-      out_len += snprintf(out + out_len, out_cap - out_len, "%s\n", listen_lines[i]);
+      OUT_APPEND("%s\n", listen_lines[i]);
     if (n_listen == 0)
-      out_len += snprintf(out + out_len, out_cap - out_len, "* 5140\n");
+      OUT_APPEND("* 5140\n");
   }
 
   if (!has_global) {
-    out_len += snprintf(out + out_len, out_cap - out_len, "[global]\n");
+    OUT_APPEND("[global]\n");
     for (size_t i = 0; i < n_kvs; i++) {
       if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
-        out_len += snprintf(out + out_len, out_cap - out_len, "%s = %s\n", kvs[i].key, kvs[i].value);
+        OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
         applied[i] = 1;
       }
     }
   }
 
   if (!has_bind) {
-    out_len += snprintf(out + out_len, out_cap - out_len, "[bind]\n");
+    OUT_APPEND("[bind]\n");
     for (size_t i = 0; i < n_listen; i++)
-      out_len += snprintf(out + out_len, out_cap - out_len, "%s\n", listen_lines[i]);
+      OUT_APPEND("%s\n", listen_lines[i]);
     if (n_listen == 0)
-      out_len += snprintf(out + out_len, out_cap - out_len, "* 5140\n");
+      OUT_APPEND("* 5140\n");
   }
+
+#undef OUT_APPEND
 
   free(content);
   free(applied);
