@@ -11,7 +11,7 @@ rtp2httpd converts multicast RTP/UDP streams and RTSP streams into unicast HTTP 
 Armbian and Debian-based systems are supported through the installer script in [scripts/install-armbian.sh](scripts/install-armbian.sh):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/install-armbian.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/hungngit2/rtp2httpd/main/scripts/install-armbian.sh | sudo sh
 ```
 
 The installer downloads the latest release binary, installs it to `/usr/local/bin/rtp2httpd`, creates an example config at `/etc/rtp2httpd.conf`, and sets up a systemd service.
