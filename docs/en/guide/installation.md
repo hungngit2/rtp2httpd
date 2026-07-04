@@ -7,7 +7,21 @@ rtp2httpd supports multiple installation methods to suit different usage scenari
 OpenWrt is the best runtime environment for rtp2httpd. In mainland China, you usually need to complete IPTV network integration first (you can search for tutorials like `OpenWrt IPTV integration`), obtain IPTV internal network IP via DHCP, before you can access the ISP's IPTV multicast network.
 
 See [Quick Start](/en/guide/quick-start) for details.
+## Armbian / Debian Device Deployment
 
+If your device runs Armbian, Debian, or Ubuntu, you can install the latest release binary with a one-click installer and automatically create a systemd service:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/install-armbian.sh | sudo sh
+```
+
+You can also install a specific version:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/install-armbian.sh | sudo sh -s -- --version v3.10.1
+```
+
+The script installs the binary to `/usr/local/bin/rtp2httpd`, writes the default config to `/etc/rtp2httpd.conf`, and creates `/etc/systemd/system/rtp2httpd.service`.
 ## Static Binary Deployment
 
 Download the static binary file `rtp2httpd-<version>-<arch>` for your architecture from the [Releases](https://github.com/stackia/rtp2httpd/releases) page, upload to your device, `chmod +x` and run.
