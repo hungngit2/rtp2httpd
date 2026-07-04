@@ -175,7 +175,100 @@ void handle_get_config(connection_t *c) {
   connection_queue_output_and_flush(c, (const uint8_t *)buf, off);
 }
 
-/* TODO(Task 4): replace with the real form-urlencoded config rewrite handler. */
+/* Rejects values containing raw newlines, which would corrupt the line-based
+ * INI format or let a form field inject extra config lines. */
+static int value_has_newline(const char *value) {
+  return value && strpbrk(value, "\r\n") != NULL;
+}
+
+static void send_json_error(connection_t *c, int status, const char *message) {
+  char response[256];
+  send_http_headers(c, status, "application/json", NULL);
+  snprintf(response, sizeof(response), "{\"success\":false,\"error\":\"%s\"}", message);
+  connection_queue_output_and_flush(c, (const uint8_t *)response, strlen(response));
+}
+
 void handle_save_config(connection_t *c) {
-  http_send_404(c);
+  if (strcasecmp(c->http_req.method, "POST") != 0) {
+    send_json_error(c, STATUS_400, "Method not allowed. Use POST");
+    return;
+  }
+  if (c->http_req.body_len == 0) {
+    send_json_error(c, STATUS_400, "Missing request body");
+    return;
+  }
+
+  const char *cfg_path = get_config_file_path();
+  if (!cfg_path) {
+    send_json_error(c, STATUS_400, "rtp2httpd was not started with a config file, cannot save settings");
+    return;
+  }
+
+  /* +1 slot for fcc-listen-port-range, which isn't in SETTING_FIELDS because
+   * it maps to two separate config_t ints (fcc_listen_port_min/max) rather
+   * than one. */
+  setting_kv_t kvs[SETTING_FIELDS_COUNT + 1];
+  char value_bufs[SETTING_FIELDS_COUNT + 1][512];
+  size_t n_kvs = 0;
+
+  for (size_t i = 0; i < SETTING_FIELDS_COUNT; i++) {
+    const setting_field_t *f = &SETTING_FIELDS[i];
+    if (http_parse_query_param(c->http_req.body, f->config_key, value_bufs[n_kvs], sizeof(value_bufs[n_kvs])) == 0) {
+      if (value_has_newline(value_bufs[n_kvs])) {
+        send_json_error(c, STATUS_400, "Field value must not contain newlines");
+        return;
+      }
+      kvs[n_kvs].key = f->config_key;
+      kvs[n_kvs].value = value_bufs[n_kvs];
+      n_kvs++;
+    }
+  }
+  if (http_parse_query_param(c->http_req.body, "fcc-listen-port-range", value_bufs[n_kvs],
+                              sizeof(value_bufs[n_kvs])) == 0) {
+    if (value_has_newline(value_bufs[n_kvs])) {
+      send_json_error(c, STATUS_400, "Field value must not contain newlines");
+      return;
+    }
+    kvs[n_kvs].key = "fcc-listen-port-range";
+    kvs[n_kvs].value = value_bufs[n_kvs];
+    n_kvs++;
+  }
+
+  /* "listen" is submitted as one address per line (a textarea, not a
+   * repeated form field, since this codebase's query-param parser only
+   * returns the first match for a given key). */
+  char listen_raw[4096];
+  const char *listen_lines[64];
+  size_t n_listen = 0;
+
+  if (http_parse_query_param(c->http_req.body, "listen", listen_raw, sizeof(listen_raw)) == 0) {
+    char *saveptr = NULL;
+    char *line = strtok_r(listen_raw, "\n", &saveptr);
+    while (line && n_listen < 64) {
+      while (*line == ' ' || *line == '\t' || *line == '\r')
+        line++;
+      char *end = line + strlen(line);
+      while (end > line && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'))
+        *--end = '\0';
+      if (line[0] != '\0') {
+        listen_lines[n_listen++] = line;
+      }
+      line = strtok_r(NULL, "\n", &saveptr);
+    }
+  }
+
+  if (config_apply_global_settings(cfg_path, kvs, n_kvs, listen_lines, n_listen) != 0) {
+    send_json_error(c, STATUS_500, "Failed to write config file");
+    return;
+  }
+
+  pid_t supervisor_pid = getppid();
+  if (kill(supervisor_pid, SIGHUP) != 0) {
+    send_json_error(c, STATUS_500, "Config saved, but failed to trigger reload");
+    return;
+  }
+
+  send_http_headers(c, STATUS_200, "application/json", NULL);
+  const char *ok = "{\"success\":true,\"message\":\"Settings saved and reload triggered\"}";
+  connection_queue_output_and_flush(c, (const uint8_t *)ok, strlen(ok));
 }
