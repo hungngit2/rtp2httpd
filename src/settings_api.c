@@ -95,7 +95,7 @@ static size_t json_append_escaped_string(char *dst, size_t dst_size, const char 
 static void format_bind_address(bindaddr_t *ba, char *out, size_t out_size) {
   if (ba->type == BIND_ADDR_UNIX) {
     snprintf(out, out_size, "%s", ba->path);
-  } else if (strcmp(ba->node, "*") == 0) {
+  } else if (ba->node == NULL || strcmp(ba->node, "*") == 0) {
     snprintf(out, out_size, "%s", ba->service);
   } else if (strchr(ba->node, ':')) {
     snprintf(out, out_size, "[%s]:%s", ba->node, ba->service);
