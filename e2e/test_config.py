@@ -5,6 +5,7 @@ Tests cover command-line flags, config file sections, default values,
 and precedence rules.
 """
 
+import json
 import time  # needed for TestMaxClients deadline loop
 
 import pytest
@@ -852,3 +853,28 @@ class TestQuietMode:
             assert status == 200
         finally:
             r2h.stop()
+
+
+def test_get_config_endpoint_reflects_running_config(r2h_binary):
+    port = find_free_port()
+    config = f"""\
+[global]
+verbosity = 3
+maxclients = 7
+hostname = example.test
+
+[bind]
+* {port}
+"""
+    r2h = R2HProcess(r2h_binary, port, config_content=config)
+    r2h.start()
+    try:
+        status, _, body = http_get("127.0.0.1", port, "/setting/api/get-config")
+        assert status == 200
+        data = json.loads(body)
+        assert data["maxclients"] == 7
+        assert data["hostname"] == "example.test"
+        assert data["verbosity"] == 3
+        assert data["listen"] == [str(port)]
+    finally:
+        r2h.stop()

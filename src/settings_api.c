@@ -1,0 +1,181 @@
+#include "settings_api.h"
+#include "configuration.h"
+#include "http.h"
+#include "utils.h"
+#include <signal.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+typedef enum { FT_STRING, FT_INT, FT_BOOL, FT_IFNAME } field_type_t;
+
+typedef struct {
+  const char *config_key; /* key as it appears in rtp2httpd.conf and in the JSON/form payload */
+  field_type_t type;
+  size_t offset; /* offsetof(config_t, field) */
+} setting_field_t;
+
+/* Table-driven list of every global setting exposed by /setting. Adding a
+ * field here is the only change needed to expose it via GET/POST; both
+ * handlers below are fully generic over this table. */
+const setting_field_t SETTING_FIELDS[] = {
+    {"verbosity", FT_INT, offsetof(config_t, verbosity)},
+    {"maxclients", FT_INT, offsetof(config_t, maxclients)},
+    {"hostname", FT_STRING, offsetof(config_t, hostname)},
+    {"xff", FT_BOOL, offsetof(config_t, xff)},
+    {"r2h-token", FT_STRING, offsetof(config_t, r2h_token)},
+    {"workers", FT_INT, offsetof(config_t, workers)},
+    {"buffer-pool-max-size", FT_INT, offsetof(config_t, buffer_pool_max_size)},
+    {"udp-rcvbuf-size", FT_INT, offsetof(config_t, udp_rcvbuf_size)},
+    {"upstream-interface", FT_IFNAME, offsetof(config_t, upstream_interface)},
+    {"upstream-interface-fcc", FT_IFNAME, offsetof(config_t, upstream_interface_fcc)},
+    {"upstream-interface-rtsp", FT_IFNAME, offsetof(config_t, upstream_interface_rtsp)},
+    {"upstream-interface-multicast", FT_IFNAME, offsetof(config_t, upstream_interface_multicast)},
+    {"upstream-interface-http", FT_IFNAME, offsetof(config_t, upstream_interface_http)},
+    {"mcast-rejoin-interval", FT_INT, offsetof(config_t, mcast_rejoin_interval)},
+    {"ffmpeg-path", FT_STRING, offsetof(config_t, ffmpeg_path)},
+    {"ffmpeg-args", FT_STRING, offsetof(config_t, ffmpeg_args)},
+    {"video-snapshot", FT_BOOL, offsetof(config_t, video_snapshot)},
+    {"status-page-path", FT_STRING, offsetof(config_t, status_page_path)},
+    {"player-page-path", FT_STRING, offsetof(config_t, player_page_path)},
+    {"setting-page-path", FT_STRING, offsetof(config_t, setting_page_path)},
+    {"app-path-prefix", FT_STRING, offsetof(config_t, app_path_prefix)},
+    {"use-relative-path-in-m3u", FT_BOOL, offsetof(config_t, use_relative_path_in_m3u)},
+    {"external-m3u", FT_STRING, offsetof(config_t, external_m3u_url)},
+    {"external-m3u-update-interval", FT_INT, offsetof(config_t, external_m3u_update_interval)},
+    {"zerocopy-on-send", FT_BOOL, offsetof(config_t, zerocopy_on_send)},
+    {"rtsp-stun-server", FT_STRING, offsetof(config_t, rtsp_stun_server)},
+    {"http-proxy-user-agent", FT_STRING, offsetof(config_t, http_proxy_user_agent)},
+    {"rtsp-user-agent", FT_STRING, offsetof(config_t, rtsp_user_agent)},
+    {"cors-allow-origin", FT_STRING, offsetof(config_t, cors_allow_origin)},
+    {"access-log", FT_STRING, offsetof(config_t, access_log)},
+    {"log-format", FT_STRING, offsetof(config_t, log_format)},
+};
+const size_t SETTING_FIELDS_COUNT = sizeof(SETTING_FIELDS) / sizeof(SETTING_FIELDS[0]);
+
+/* Appends a JSON-quoted, escaped copy of src to dst (which must already have
+ * room). Returns the number of bytes written (not including the terminator). */
+static size_t json_append_escaped_string(char *dst, size_t dst_size, const char *src) {
+  size_t off = 0;
+
+  if (dst_size < 3) {
+    if (dst_size > 0)
+      dst[0] = '\0';
+    return 0;
+  }
+
+  dst[off++] = '"';
+  for (; *src && off + 2 < dst_size; src++) {
+    unsigned char ch = (unsigned char)*src;
+    if (ch == '"' || ch == '\\') {
+      if (off + 3 >= dst_size)
+        break;
+      dst[off++] = '\\';
+      dst[off++] = (char)ch;
+    } else if (ch == '\n') {
+      if (off + 3 >= dst_size)
+        break;
+      dst[off++] = '\\';
+      dst[off++] = 'n';
+    } else if (ch < 0x20) {
+      continue; /* drop other control characters */
+    } else {
+      dst[off++] = (char)ch;
+    }
+  }
+  dst[off++] = '"';
+  dst[off] = '\0';
+  return off;
+}
+
+/* Renders a single bind_addresses entry as the canonical string form used by
+ * both the GET response and the "listen" form field (bare port, host:port,
+ * [ipv6]:port, or an absolute Unix socket path). */
+static void format_bind_address(bindaddr_t *ba, char *out, size_t out_size) {
+  if (ba->type == BIND_ADDR_UNIX) {
+    snprintf(out, out_size, "%s", ba->path);
+  } else if (strcmp(ba->node, "*") == 0) {
+    snprintf(out, out_size, "%s", ba->service);
+  } else if (strchr(ba->node, ':')) {
+    snprintf(out, out_size, "[%s]:%s", ba->node, ba->service);
+  } else {
+    snprintf(out, out_size, "%s:%s", ba->node, ba->service);
+  }
+}
+
+void handle_get_config(connection_t *c) {
+  static char buf[16384];
+  size_t off = 0;
+
+  off += snprintf(buf + off, sizeof(buf) - off, "{");
+
+  for (size_t i = 0; i < SETTING_FIELDS_COUNT; i++) {
+    const setting_field_t *f = &SETTING_FIELDS[i];
+    const char *base = (const char *)&config;
+
+    if (i > 0)
+      buf[off++] = ',';
+
+    off += snprintf(buf + off, sizeof(buf) - off, "\"%s\":", f->config_key);
+
+    switch (f->type) {
+    case FT_INT: {
+      int v = *(const int *)(base + f->offset);
+      off += snprintf(buf + off, sizeof(buf) - off, "%d", v);
+      break;
+    }
+    case FT_BOOL: {
+      int v = *(const int *)(base + f->offset);
+      off += snprintf(buf + off, sizeof(buf) - off, "%s", v ? "true" : "false");
+      break;
+    }
+    case FT_STRING: {
+      const char *v = *(const char *const *)(base + f->offset);
+      off += json_append_escaped_string(buf + off, sizeof(buf) - off, v ? v : "");
+      break;
+    }
+    case FT_IFNAME: {
+      const char *v = base + f->offset;
+      off += json_append_escaped_string(buf + off, sizeof(buf) - off, v);
+      break;
+    }
+    }
+  }
+
+  /* fcc-listen-port-range: combine the two int fields into "start-end" */
+  {
+    char range[32] = "";
+    if (config.fcc_listen_port_min > 0 && config.fcc_listen_port_max > 0) {
+      snprintf(range, sizeof(range), "%d-%d", config.fcc_listen_port_min, config.fcc_listen_port_max);
+    }
+    off += snprintf(buf + off, sizeof(buf) - off, ",\"fcc-listen-port-range\":");
+    off += json_append_escaped_string(buf + off, sizeof(buf) - off, range);
+  }
+
+  /* listen: bind_addresses linked list rendered as canonical strings */
+  off += snprintf(buf + off, sizeof(buf) - off, ",\"listen\":[");
+  {
+    bindaddr_t *ba = bind_addresses;
+    int first = 1;
+    char line[256];
+
+    while (ba) {
+      if (!first)
+        buf[off++] = ',';
+      first = 0;
+      format_bind_address(ba, line, sizeof(line));
+      off += json_append_escaped_string(buf + off, sizeof(buf) - off, line);
+      ba = ba->next;
+    }
+  }
+  off += snprintf(buf + off, sizeof(buf) - off, "]}");
+
+  send_http_headers(c, STATUS_200, "application/json", NULL);
+  connection_queue_output_and_flush(c, (const uint8_t *)buf, off);
+}
+
+/* TODO(Task 4): replace with the real form-urlencoded config rewrite handler. */
+void handle_save_config(connection_t *c) {
+  http_send_404(c);
+}
