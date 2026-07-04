@@ -6,6 +6,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 typedef enum { FT_STRING, FT_INT, FT_BOOL, FT_IFNAME } field_type_t;
@@ -251,6 +252,10 @@ void handle_save_config(connection_t *c) {
       while (end > line && (end[-1] == ' ' || end[-1] == '\t' || end[-1] == '\r'))
         *--end = '\0';
       if (line[0] != '\0') {
+        if (value_has_newline(line)) {
+          send_json_error(c, STATUS_400, "Field value must not contain newlines");
+          return;
+        }
         listen_lines[n_listen++] = line;
       }
       line = strtok_r(NULL, "\n", &saveptr);
