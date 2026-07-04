@@ -934,6 +934,14 @@ int connection_route_and_start(connection_t *c) {
     return 0;
   }
 
+  /* Handle setting page */
+  const char *setting_route = config.setting_page_route ? config.setting_page_route : "setting";
+  size_t setting_route_len = strlen(setting_route);
+  if (setting_route_len == path_len && strncmp(service_path, setting_route, path_len) == 0) {
+    handle_embedded_file(c, "/setting.html");
+    return 0;
+  }
+
   /* Handle /playlist.m3u request */
   const char *playlist_route = "playlist.m3u";
   size_t playlist_route_len = strlen(playlist_route);

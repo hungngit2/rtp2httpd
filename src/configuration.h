@@ -100,6 +100,11 @@ typedef struct {
   char *player_page_route; /* Player page path without leading slash (may be
                               empty) */
 
+  /* Setting page settings */
+  char *setting_page_path;  /* Absolute HTTP path for setting page (leading slash) */
+  char *setting_page_route; /* Setting page path without leading slash (may be
+                               empty) */
+
   /* Public app mount path settings */
   char *app_path_prefix;        /* Absolute public app path prefix, or empty string */
   char *app_path_route;         /* App path prefix without leading slash, or empty string */

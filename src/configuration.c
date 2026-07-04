@@ -44,6 +44,7 @@ int cmd_upstream_interface_http_set = 0;
 int cmd_fcc_listen_port_range_set = 0;
 int cmd_status_page_path_set = 0;
 int cmd_player_page_path_set = 0;
+int cmd_setting_page_path_set = 0;
 int cmd_app_path_prefix_set = 0;
 int cmd_use_relative_path_in_m3u_set = 0;
 int cmd_zerocopy_on_send_set = 0;
@@ -59,7 +60,7 @@ int cmd_log_format_set = 0;
 
 enum section_e { SEC_NONE = 0, SEC_BIND, SEC_SERVICES, SEC_GLOBAL };
 
-enum long_option_e { OPT_APP_PATH_PREFIX = 1000, OPT_USE_RELATIVE_PATH_IN_M3U, OPT_ACCESS_LOG, OPT_LOG_FORMAT };
+enum long_option_e { OPT_APP_PATH_PREFIX = 1000, OPT_USE_RELATIVE_PATH_IN_M3U, OPT_ACCESS_LOG, OPT_LOG_FORMAT, OPT_SETTING_PAGE_PATH };
 
 /* M3U parsing state variables */
 static char *inline_m3u_buffer = NULL;
@@ -122,6 +123,11 @@ static void free_config_strings(config_t *target, bool force_free) {
   if (!cmd_player_page_path_set || force_free) {
     safe_free_string(&target->player_page_path);
     safe_free_string(&target->player_page_route);
+  }
+
+  if (!cmd_setting_page_path_set || force_free) {
+    safe_free_string(&target->setting_page_path);
+    safe_free_string(&target->setting_page_route);
   }
   if (!cmd_app_path_prefix_set || force_free) {
     safe_free_string(&target->app_path_prefix);
@@ -306,6 +312,10 @@ static void set_status_page_path_value(const char *value) {
 
 static void set_player_page_path_value(const char *value) {
   set_page_path_value(value, "player", &config.player_page_path, &config.player_page_route);
+}
+
+static void set_setting_page_path_value(const char *value) {
+  set_page_path_value(value, "setting", &config.setting_page_path, &config.setting_page_route);
 }
 
 static void set_app_path_prefix_value(const char *value) {
@@ -642,6 +652,12 @@ void parse_global_sec(char *line) {
   if (strcasecmp("player-page-path", param) == 0) {
     if (set_if_not_cmd_override(cmd_player_page_path_set, "player-page-path"))
       set_player_page_path_value(value);
+    return;
+  }
+
+  if (strcasecmp("setting-page-path", param) == 0) {
+    if (set_if_not_cmd_override(cmd_setting_page_path_set, "setting-page-path"))
+      set_setting_page_path_value(value);
     return;
   }
 
@@ -1067,6 +1083,8 @@ int config_snapshot(config_t *snapshot) {
   snapshot->status_page_route = NULL;
   snapshot->player_page_path = NULL;
   snapshot->player_page_route = NULL;
+  snapshot->setting_page_path = NULL;
+  snapshot->setting_page_route = NULL;
   snapshot->app_path_prefix = NULL;
   snapshot->app_path_route = NULL;
   snapshot->external_m3u_url = NULL;
@@ -1091,6 +1109,8 @@ int config_snapshot(config_t *snapshot) {
   SNAPSHOT_STRING(status_page_route, cmd_status_page_path_set);
   SNAPSHOT_STRING(player_page_path, cmd_player_page_path_set);
   SNAPSHOT_STRING(player_page_route, cmd_player_page_path_set);
+  SNAPSHOT_STRING(setting_page_path, cmd_setting_page_path_set);
+  SNAPSHOT_STRING(setting_page_route, cmd_setting_page_path_set);
   SNAPSHOT_STRING(app_path_prefix, cmd_app_path_prefix_set);
   SNAPSHOT_STRING(app_path_route, cmd_app_path_prefix_set);
   SNAPSHOT_STRING(external_m3u_url, cmd_external_m3u_url_set);
@@ -1171,6 +1191,8 @@ void config_init(void) {
     set_status_page_path_value("/status");
   if (!cmd_player_page_path_set)
     set_player_page_path_value("/player");
+  if (!cmd_setting_page_path_set)
+    set_setting_page_path_value("/setting");
   if (!cmd_app_path_prefix_set)
     set_app_path_prefix_value("");
   if (!cmd_log_format_set)
@@ -1312,6 +1334,8 @@ void usage(FILE *f, char *progname) {
           "/status)\n"
           "\t-p --player-page-path <path>  HTTP path for player UI (default: "
           "/player)\n"
+          "\t   --setting-page-path <path>  HTTP path for settings UI (default: "
+          "/setting)\n"
           "\t   --app-path-prefix <path>  Public mount path prefix for all HTTP "
           "resources (default: none)\n"
           "\t   --use-relative-path-in-m3u  Use root-relative URLs in generated "
@@ -1403,6 +1427,7 @@ void parse_cmd_line(int argc, char *argv[]) {
                                     {"video-snapshot", no_argument, 0, 'S'},
                                     {"status-page-path", required_argument, 0, 's'},
                                     {"player-page-path", required_argument, 0, 'p'},
+                                    {"setting-page-path", required_argument, 0, OPT_SETTING_PAGE_PATH},
                                     {"app-path-prefix", required_argument, 0, OPT_APP_PATH_PREFIX},
                                     {"use-relative-path-in-m3u", no_argument, 0, OPT_USE_RELATIVE_PATH_IN_M3U},
                                     {"external-m3u", required_argument, 0, 'M'},
@@ -1529,6 +1554,10 @@ void parse_cmd_line(int argc, char *argv[]) {
     case 'p':
       set_player_page_path_value(optarg);
       cmd_player_page_path_set = 1;
+      break;
+    case OPT_SETTING_PAGE_PATH:
+      set_setting_page_path_value(optarg);
+      cmd_setting_page_path_set = 1;
       break;
     case OPT_APP_PATH_PREFIX:
       set_app_path_prefix_value(optarg);
