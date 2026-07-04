@@ -22,6 +22,9 @@ curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/inst
 ```
 
 The script installs the binary to `/usr/local/bin/rtp2httpd`, writes the default config to `/etc/rtp2httpd.conf`, and creates `/etc/systemd/system/rtp2httpd.service`.
+
+After installation, open `http://<device-ip>:5140/setting` in a browser to access the settings page and change configuration without SSH access (changes take effect automatically after saving).
+
 ## Static Binary Deployment
 
 Download the static binary file `rtp2httpd-<version>-<arch>` for your architecture from the [Releases](https://github.com/stackia/rtp2httpd/releases) page, upload to your device, `chmod +x` and run.

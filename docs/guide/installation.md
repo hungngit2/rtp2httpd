@@ -24,6 +24,8 @@ curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/inst
 
 脚本会安装到 `/usr/local/bin/rtp2httpd`，默认配置文件写入 `/etc/rtp2httpd.conf`，并创建 `/etc/systemd/system/rtp2httpd.service`。
 
+安装完成后，可以通过浏览器访问 `http://<设备IP>:5140/setting` 打开设置页面，无需 SSH 登录即可修改配置（保存后自动生效）。
+
 ## 静态二进制文件部署
 
 从 [Releases](https://github.com/stackia/rtp2httpd/releases) 页面下载对应架构的静态二进制文件 `rtp2httpd-<版本号>-<架构>`，上传到设备并 `chmod +x` 后即可运行。

@@ -141,10 +141,11 @@ class TestPlayerPage:
 # ---------------------------------------------------------------------------
 
 
-def test_setting_page_default_route_404s_until_asset_exists(basic_r2h):
-    """/setting is dispatched, but returns 404 until setting.html is embedded (Task 7)."""
-    status, _, _ = http_get("127.0.0.1", basic_r2h.port, "/setting")
-    assert status == 404
+def test_setting_page_serves_html(basic_r2h):
+    status, headers, body = http_get("127.0.0.1", basic_r2h.port, "/setting")
+    assert status == 200
+    assert "text/html" in get_header(headers, "Content-Type")
+    assert b"<title>rtp2httpd Settings</title>" in body
 
 
 def test_setting_page_path_is_configurable(r2h_binary):
@@ -160,9 +161,9 @@ setting-page-path = /admin
     r2h = R2HProcess(r2h_binary, port, config_content=config)
     r2h.start()
     try:
-        _wait_for_http_status(port, "/admin", expected=404)  # dispatched, asset missing until Task 7
+        _wait_for_http_status(port, "/admin", expected=200)
         status, _, _ = http_get("127.0.0.1", port, "/setting")
-        assert status == 404  # default route no longer active once overridden
+        assert status == 404
     finally:
         r2h.stop()
 

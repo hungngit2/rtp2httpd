@@ -83,6 +83,7 @@ Unix socket listen paths must be absolute and must not contain whitespace. At st
   - Set to `*` to allow all origins, or specify a domain (e.g., `https://example.com`)
 - `-s, --status-page-path <path>` - Status page and API root path (default: /status)
 - `-p, --player-page-path <path>` - Built-in player page path (default: /player)
+- `--setting-page-path <path>` - HTTP path for the settings page (default: /setting)
 - `--app-path-prefix <path>` - Public access prefix for all HTTP resources (default: none)
 - `--use-relative-path-in-m3u` - Use root-relative URLs when generating playlist.m3u or rewriting M3U through the HTTP proxy (default: disabled)
 
@@ -159,6 +160,9 @@ status-page-path = /status
 
 # Player page app path (default: /player; mounted under app-path-prefix when configured)
 player-page-path = /player
+
+# HTTP path for the settings page (default: /setting; mounted under app-path-prefix when configured)
+setting-page-path = /setting
 
 # Public access prefix for all HTTP resources (default: none)
 # After this is set, the status page, player, static assets,
