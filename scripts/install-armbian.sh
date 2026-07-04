@@ -16,6 +16,7 @@ REPO_OWNER="stackia"
 REPO_NAME="rtp2httpd"
 GITHUB_API="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}"
 GITHUB_RELEASE="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download"
+SOURCE_REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
 
 # Installation paths
 INSTALL_DIR="/usr/local/bin"
@@ -27,6 +28,7 @@ TMP_DIR="/tmp/rtp2httpd_install_armbian"
 LANG_CODE="en"
 SELECTED_VERSION=""
 ENABLE_SERVICE=true
+FROM_SOURCE=""
 
 # Message helper
 msg() {
@@ -83,6 +85,67 @@ ensure_basic_tools() {
 
     print_error "$(msg '未找到 curl 或 wget，且 apt-get 不可用' 'Neither curl nor wget was found and apt-get is unavailable')"
     exit 1
+}
+
+ensure_build_tools() {
+    if command -v git >/dev/null 2>&1 && command -v cmake >/dev/null 2>&1 && command -v cc >/dev/null 2>&1 &&
+        command -v node >/dev/null 2>&1 && command -v corepack >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if ! command -v apt-get >/dev/null 2>&1; then
+        print_error "$(msg '未找到 apt-get，无法自动安装编译依赖，请手动安装 git cmake build-essential nodejs 后重试' 'apt-get not found, cannot auto-install build dependencies; please install git, cmake, build-essential, and nodejs manually and retry')"
+        exit 1
+    fi
+
+    print_info "$(msg '正在安装编译依赖...' 'Installing build dependencies...')"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update >/dev/null 2>&1
+
+    if ! command -v git >/dev/null 2>&1 || ! command -v cmake >/dev/null 2>&1 || ! command -v cc >/dev/null 2>&1; then
+        apt-get install -y git cmake build-essential pkg-config >/dev/null 2>&1
+    fi
+
+    if ! command -v node >/dev/null 2>&1; then
+        print_info "$(msg '正在安装 Node.js...' 'Installing Node.js...')"
+        curl -fsSL https://deb.nodesource.com/setup_24.x | bash - >/dev/null 2>&1
+        apt-get install -y nodejs >/dev/null 2>&1
+    fi
+
+    if ! command -v corepack >/dev/null 2>&1; then
+        npm install -g corepack >/dev/null 2>&1 || true
+    fi
+    corepack enable >/dev/null 2>&1 || true
+}
+
+# Clone and build rtp2httpd from source. Echoes the built binary's path on
+# success (all other output goes to stderr so command substitution stays clean).
+build_from_source() {
+    ref="$1"
+    repo_url="$2"
+    src_dir="${TMP_DIR}/src"
+
+    print_info "$(msg "正在从源码构建 (仓库: $repo_url, 引用: $ref)..." "Building from source (repo: $repo_url, ref: $ref)...")"
+
+    rm -rf "$src_dir"
+    if ! git clone --branch "$ref" --depth 1 "$repo_url" "$src_dir" >&2; then
+        print_error "$(msg "克隆仓库失败: $repo_url ($ref)" "Failed to clone repository: $repo_url ($ref)")"
+        exit 1
+    fi
+
+    (
+        cd "$src_dir"
+
+        print_info "$(msg '正在构建 Web UI...' 'Building web UI...')" >&2
+        pnpm install --frozen-lockfile
+        pnpm run web-ui:build
+
+        print_info "$(msg '正在编译 rtp2httpd...' 'Compiling rtp2httpd...')" >&2
+        cmake -B build -DCMAKE_BUILD_TYPE=Release -DENABLE_AGGRESSIVE_OPT=ON
+        cmake --build build -j"$(getconf _NPROCESSORS_ONLN)"
+    ) >&2
+
+    echo "${src_dir}/build/rtp2httpd"
 }
 
 detect_download_tool() {
@@ -285,6 +348,26 @@ parse_args() {
                 ENABLE_SERVICE=false
                 shift
                 ;;
+            --from-source)
+                if [ -n "${2:-}" ]; then
+                    FROM_SOURCE="$2"
+                    shift
+                else
+                    print_error "$(msg '--from-source 需要指定分支、标签或 commit' '--from-source requires a branch, tag, or commit')"
+                    exit 1
+                fi
+                shift
+                ;;
+            --repo-url)
+                if [ -n "${2:-}" ]; then
+                    SOURCE_REPO_URL="$2"
+                    shift
+                else
+                    print_error "$(msg '--repo-url 需要指定仓库地址' '--repo-url requires a repository URL')"
+                    exit 1
+                fi
+                shift
+                ;;
             --help|-h)
                 echo "$(msg '用法' 'Usage'): $0 [$(msg '选项' 'options')]"
                 echo ""
@@ -292,6 +375,8 @@ parse_args() {
                 echo "  --lang <zh|en>  $(msg '设置界面语言（默认: en）' 'Set display language (default: en)')"
                 echo "  --version <vX.Y.Z>  $(msg '安装指定版本' 'Install a specific version')"
                 echo "  --no-service    $(msg '跳过创建和启用 systemd 服务' 'Skip creating and enabling systemd service')"
+                echo "  --from-source <ref>  $(msg '从源码构建安装指定分支/标签/commit，而非下载 Release 二进制文件' 'Build and install from source at this branch/tag/commit, instead of downloading a release binary')"
+                echo "  --repo-url <url>  $(msg "配合 --from-source 使用，指定要克隆的仓库地址（默认: ${SOURCE_REPO_URL}）" "Used with --from-source, the repository URL to clone (default: ${SOURCE_REPO_URL})")"
                 echo "  --help, -h      $(msg '显示此帮助信息' 'Show help')"
                 echo ""
                 exit 0
@@ -318,35 +403,43 @@ main() {
 
     ensure_basic_tools
 
-    DOWNLOAD_TOOL=$(detect_download_tool)
-    if [ -z "$DOWNLOAD_TOOL" ]; then
-        print_error "$(msg '未找到 curl 或 wget' 'Neither curl nor wget was found')"
-        exit 1
-    fi
+    if [ -n "$FROM_SOURCE" ]; then
+        ensure_build_tools
 
-    print_info "$(msg "检测到下载工具: $DOWNLOAD_TOOL" "Detected download tool: $DOWNLOAD_TOOL")"
-
-    ARCH=$(detect_arch)
-    print_info "$(msg "检测到架构: $ARCH" "Detected architecture: $ARCH")"
-
-    if [ -z "$SELECTED_VERSION" ]; then
-        VERSION=$(get_latest_version)
+        mkdir -p "$TMP_DIR"
+        VERSION="$FROM_SOURCE"
+        BINARY_PATH=$(build_from_source "$FROM_SOURCE" "$SOURCE_REPO_URL")
     else
-        VERSION="$SELECTED_VERSION"
-        print_info "$(msg "使用指定版本: $VERSION" "Using specified version: $VERSION")"
-    fi
+        DOWNLOAD_TOOL=$(detect_download_tool)
+        if [ -z "$DOWNLOAD_TOOL" ]; then
+            print_error "$(msg '未找到 curl 或 wget' 'Neither curl nor wget was found')"
+            exit 1
+        fi
 
-    mkdir -p "$TMP_DIR"
+        print_info "$(msg "检测到下载工具: $DOWNLOAD_TOOL" "Detected download tool: $DOWNLOAD_TOOL")"
 
-    ASSET_NAME=$(get_release_asset_name "$VERSION" "$ARCH")
-    DOWNLOAD_URL=$(build_download_url "$VERSION" "$ASSET_NAME")
+        ARCH=$(detect_arch)
+        print_info "$(msg "检测到架构: $ARCH" "Detected architecture: $ARCH")"
 
-    print_info "$(msg "准备下载软件包: $ASSET_NAME" "Preparing to download package: $ASSET_NAME")"
+        if [ -z "$SELECTED_VERSION" ]; then
+            VERSION=$(get_latest_version)
+        else
+            VERSION="$SELECTED_VERSION"
+            print_info "$(msg "使用指定版本: $VERSION" "Using specified version: $VERSION")"
+        fi
 
-    BINARY_PATH="$TMP_DIR/$(basename "$ASSET_NAME")"
-    if ! download_file "$DOWNLOAD_URL" "$BINARY_PATH"; then
-        cleanup
-        exit 1
+        mkdir -p "$TMP_DIR"
+
+        ASSET_NAME=$(get_release_asset_name "$VERSION" "$ARCH")
+        DOWNLOAD_URL=$(build_download_url "$VERSION" "$ASSET_NAME")
+
+        print_info "$(msg "准备下载软件包: $ASSET_NAME" "Preparing to download package: $ASSET_NAME")"
+
+        BINARY_PATH="$TMP_DIR/$(basename "$ASSET_NAME")"
+        if ! download_file "$DOWNLOAD_URL" "$BINARY_PATH"; then
+            cleanup
+            exit 1
+        fi
     fi
 
     install -d "$INSTALL_DIR"
