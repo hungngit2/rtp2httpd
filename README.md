@@ -1,8 +1,20 @@
-# <img src="./icon.svg" width="24" height="24"> rtp2httpd - IPTV 流媒体转发服务器
+# <img src="./icon.svg" width="24" height="24"> rtp2httpd - IPTV Streaming Gateway
 
-[>> 访问官方文档网站 <<](https://rtp2httpd.com)
+[>> Official Documentation <<](https://rtp2httpd.com)
 
 [>> English Documentation <<](https://rtp2httpd.com/en/)
+
+English overview:
+
+rtp2httpd is a multimedia streaming gateway for converting multicast RTP/UDP and RTSP streams into standard HTTP unicast streams. It is designed for IPTV environments and can be deployed on routers, mini PCs, Arm boards, and other Linux hosts. Armbian and Debian-based systems are supported through the installer script in [scripts/install-armbian.sh](scripts/install-armbian.sh).
+
+Quick install on Armbian / Debian:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/install-armbian.sh | sudo sh
+```
+
+The installer downloads the latest release binary, installs it to /usr/local/bin/rtp2httpd, creates an example config at /etc/rtp2httpd.conf, and sets up a systemd service.
 
 rtp2httpd 是一个多媒体流转发服务器。本项目基于 [oskar456/rtp2httpd](https://github.com/oskar456/rtp2httpd) 做了完全重写，在原项目基础上加入了许多新功能，专为中国大陆 IPTV 环境设计。
 
