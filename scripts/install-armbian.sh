@@ -55,14 +55,14 @@ print_error() {
 
 check_root() {
     if [ "$(id -u)" -ne 0 ]; then
-        print_error "$(msg 'This script must be run as root' 'This script must be run as root')"
+        print_error "$(msg '此脚本必须以 root 身份运行' 'This script must be run as root')"
         exit 1
     fi
 }
 
 check_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
-        print_error "$(msg "Command not found: $1" "Command not found: $1")"
+        print_error "$(msg "未找到命令: $1" "Command not found: $1")"
         return 1
     fi
     return 0
@@ -74,14 +74,14 @@ ensure_basic_tools() {
     fi
 
     if command -v apt-get >/dev/null 2>&1; then
-        print_info "$(msg 'Installing curl and wget for this system...' 'Installing curl and wget for this system...')"
+        print_info "$(msg '正在为系统安装 curl 和 wget...' 'Installing curl and wget for this system...')"
         export DEBIAN_FRONTEND=noninteractive
         apt-get update >/dev/null 2>&1
         apt-get install -y curl wget ca-certificates >/dev/null 2>&1
         return 0
     fi
 
-    print_error "$(msg 'Neither curl nor wget was found and apt-get is unavailable' 'Neither curl nor wget was found and apt-get is unavailable')"
+    print_error "$(msg '未找到 curl 或 wget，且 apt-get 不可用' 'Neither curl nor wget was found and apt-get is unavailable')"
     exit 1
 }
 
@@ -111,7 +111,20 @@ detect_arch() {
             fi
             ;;
         armv6l|armv6)
-            echo "arm-eabi"
+            if [ -f /proc/cpuinfo ] && grep -qi 'vfp' /proc/cpuinfo; then
+                echo "arm-eabihf"
+            else
+                echo "arm-eabi"
+            fi
+            ;;
+        mips64)
+            echo "mips64"
+            ;;
+        mips)
+            echo "mips"
+            ;;
+        mipsel)
+            echo "mipsel"
             ;;
         *)
             echo "$(uname -m)"
@@ -120,16 +133,16 @@ detect_arch() {
 }
 
 get_latest_version() {
-print_info "$(msg 'Fetching latest version information...' 'Fetching latest version information...')"
+    print_info "$(msg '获取最新版本信息...' 'Fetching latest version information...')"
 
     version=$(curl -fsSL "${GITHUB_API}/releases/latest" 2>/dev/null | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' | head -n 1)
 
     if [ -z "$version" ]; then
-        print_error "$(msg 'Unable to fetch latest version information' 'Unable to fetch latest version information')"
+        print_error "$(msg '无法获取最新版本信息' 'Unable to fetch latest version information')"
         exit 1
     fi
 
-    print_info "$(msg "Latest version: $version" "Latest version: $version")"
+    print_info "$(msg "最新版本: $version" "Latest version: $version")"
     echo "$version"
 }
 
@@ -159,7 +172,7 @@ download_file() {
     url="$1"
     output="$2"
 
-    print_info "$(msg 'Downloading' 'Downloading'): $(basename "$output")"
+    print_info "$(msg '下载' 'Downloading'): $(basename "$output")"
 
     if [ "$DOWNLOAD_TOOL" = "curl" ]; then
         if ! curl -fsSL -o "$output" "$url"; then
@@ -178,11 +191,11 @@ download_file() {
 
 create_default_config() {
     if [ -f "$CONFIG_PATH" ]; then
-        print_warn "$(msg "Config file already exists, skipping: $CONFIG_PATH" "Config file already exists, skipping: $CONFIG_PATH")"
-        return 0do
+        print_warn "$(msg "配置文件已存在，跳过: $CONFIG_PATH" "Config file already exists, skipping: $CONFIG_PATH")"
+        return 0
     fi
 
-    print_info "$(msg 'Creating default config file...' 'Creating default config file...')"
+    print_info "$(msg '正在创建默认配置文件...' 'Creating default config file...')"
 
     install -d "$(dirname "$CONFIG_PATH")"
 
@@ -197,11 +210,11 @@ EOF
 
 create_systemd_service() {
     if [ -f "$SERVICE_PATH" ]; then
-        print_warn "$(msg "systemd service already exists, skipping: $SERVICE_PATH" "systemd service already exists, skipping: $SERVICE_PATH")"
+        print_warn "$(msg "systemd 服务已存在，跳过: $SERVICE_PATH" "systemd service already exists, skipping: $SERVICE_PATH")"
         return 0
     fi
 
-    print_info "$(msg 'Creating systemd service...' 'Creating systemd service...')"
+    print_info "$(msg '正在创建 systemd 服务...' 'Creating systemd service...')"
 
     install -d "$(dirname "$SERVICE_PATH")"
 
@@ -228,17 +241,17 @@ enable_service() {
     fi
 
     if command -v systemctl >/dev/null 2>&1; then
-        print_info "$(msg 'Reloading systemd configuration...' 'Reloading systemd configuration...')"
+        print_info "$(msg '正在重新加载 systemd 配置...' 'Reloading systemd configuration...')"
         systemctl daemon-reload 2>/dev/null || true
         systemctl enable rtp2httpd.service 2>/dev/null || true
     else
-        print_warn "$(msg 'systemctl not detected, skipping service enablement' 'systemctl not detected, skipping service enablement')"
+        print_warn "$(msg '未检测到 systemctl，跳过服务启用' 'systemctl not detected, skipping service enablement')"
     fi
 }
 
 cleanup() {
     if [ -d "$TMP_DIR" ]; then
-        print_info "$(msg 'Cleaning up temporary files...' 'Cleaning up temporary files...')"
+        print_info "$(msg '清理临时文件...' 'Cleaning up temporary files...')"
         rm -rf "$TMP_DIR"
     fi
 }
@@ -251,7 +264,7 @@ parse_args() {
                     LANG_CODE="$2"
                     shift
                 else
-                    print_error "$(msg '--lang requires a language code (zh or en)' '--lang requires a language code (zh or en)')"
+                    print_error "$(msg '--lang 需要指定语言代码 (zh 或 en)' '--lang requires a language code (zh or en)')"
                     exit 1
                 fi
                 shift
@@ -261,7 +274,7 @@ parse_args() {
                     SELECTED_VERSION="$2"
                     shift
                 else
-                    print_error "$(msg '--version requires a version number' '--version requires a version number')"
+                    print_error "$(msg '--version 需要指定版本号' '--version requires a version number')"
                     exit 1
                 fi
                 shift
@@ -271,18 +284,18 @@ parse_args() {
                 shift
                 ;;
             --help|-h)
-                echo "$(msg 'Usage' 'Usage'): $0 [$(msg 'options' 'options')]"
+                echo "$(msg '用法' 'Usage'): $0 [$(msg '选项' 'options')]"
                 echo ""
-                echo "$(msg 'Options' 'Options'):"
-                echo "  --lang <zh|en>  $(msg 'Set display language (default: en)' 'Set display language (default: en)')"
-                echo "  --version <vX.Y.Z>  $(msg 'Install a specific version' 'Install a specific version')"
-                echo "  --no-service    $(msg 'Skip creating and enabling systemd service' 'Skip creating and enabling systemd service')"
-                echo "  --help, -h      $(msg 'Show help' 'Show help')"
+                echo "$(msg '选项' 'Options'):"
+                echo "  --lang <zh|en>  $(msg '设置界面语言（默认: en）' 'Set display language (default: en)')"
+                echo "  --version <vX.Y.Z>  $(msg '安装指定版本' 'Install a specific version')"
+                echo "  --no-service    $(msg '跳过创建和启用 systemd 服务' 'Skip creating and enabling systemd service')"
+                echo "  --help, -h      $(msg '显示此帮助信息' 'Show help')"
                 echo ""
                 exit 0
                 ;;
             *)
-                print_error "$(msg "Unknown argument: $1" "Unknown argument: $1")"
+                print_error "$(msg "未知参数: $1" "Unknown argument: $1")"
                 exit 1
                 ;;
         esac
@@ -305,20 +318,20 @@ main() {
 
     DOWNLOAD_TOOL=$(detect_download_tool)
     if [ -z "$DOWNLOAD_TOOL" ]; then
-        print_error "$(msg 'Neither curl nor wget was found' 'Neither curl nor wget was found')"
+        print_error "$(msg '未找到 curl 或 wget' 'Neither curl nor wget was found')"
         exit 1
     fi
 
-    print_info "$(msg "Detected download tool: $DOWNLOAD_TOOL" "Detected download tool: $DOWNLOAD_TOOL")"
+    print_info "$(msg "检测到下载工具: $DOWNLOAD_TOOL" "Detected download tool: $DOWNLOAD_TOOL")"
 
     ARCH=$(detect_arch)
-    print_info "$(msg "Detected architecture: $ARCH" "Detected architecture: $ARCH")"
+    print_info "$(msg "检测到架构: $ARCH" "Detected architecture: $ARCH")"
 
     if [ -z "$SELECTED_VERSION" ]; then
         VERSION=$(get_latest_version)
     else
         VERSION="$SELECTED_VERSION"
-        print_info "$(msg "Using specified version: $VERSION" "Using specified version: $VERSION")"
+        print_info "$(msg "使用指定版本: $VERSION" "Using specified version: $VERSION")"
     fi
 
     mkdir -p "$TMP_DIR"
@@ -326,7 +339,7 @@ main() {
     ASSET_NAME=$(get_release_asset_name "$VERSION" "$ARCH")
     DOWNLOAD_URL=$(build_download_url "$VERSION" "$ASSET_NAME")
 
-    print_info "$(msg "Preparing to download package: $ASSET_NAME" "Preparing to download package: $ASSET_NAME")"
+    print_info "$(msg "准备下载软件包: $ASSET_NAME" "Preparing to download package: $ASSET_NAME")"
 
     BINARY_PATH="$TMP_DIR/$(basename "$ASSET_NAME")"
     if ! download_file "$DOWNLOAD_URL" "$BINARY_PATH"; then
@@ -345,17 +358,17 @@ main() {
 
     print_info ""
     print_info "=========================================="
-    print_info "$(msg 'Installation complete!' 'Installation complete!')"
+    print_info "$(msg '安装完成！' 'Installation complete!')"
     print_info "=========================================="
     print_info ""
-    print_info "$(msg "Installed version: $VERSION" "Installed version: $VERSION")"
-    print_info "$(msg "Binary: $INSTALL_DIR/rtp2httpd" "Binary: $INSTALL_DIR/rtp2httpd")"
-    print_info "$(msg "Config file: $CONFIG_PATH" "Config file: $CONFIG_PATH")"
+    print_info "$(msg "已安装版本: $VERSION" "Installed version: $VERSION")"
+    print_info "$(msg "二进制文件: $INSTALL_DIR/rtp2httpd" "Binary: $INSTALL_DIR/rtp2httpd")"
+    print_info "$(msg "配置文件: $CONFIG_PATH" "Config file: $CONFIG_PATH")"
     print_info ""
-    print_info "$(msg 'Next steps:' 'Next steps:')"
-    print_info "$(msg "1. Run: systemctl start rtp2httpd" "1. Run: systemctl start rtp2httpd")"
-    print_info "$(msg "2. Run: systemctl status rtp2httpd" "2. Run: systemctl status rtp2httpd")"
-    print_info "$(msg "3. To change settings, edit $CONFIG_PATH" "3. To change settings, edit $CONFIG_PATH")"
+    print_info "$(msg '后续步骤：' 'Next steps:')"
+    print_info "$(msg "1. 运行: systemctl start rtp2httpd" "1. Run: systemctl start rtp2httpd")"
+    print_info "$(msg "2. 运行: systemctl status rtp2httpd" "2. Run: systemctl status rtp2httpd")"
+    print_info "$(msg "3. 如需修改配置，编辑 $CONFIG_PATH" "3. To change settings, edit $CONFIG_PATH")"
     print_info ""
 }
 
