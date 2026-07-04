@@ -11,12 +11,10 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-# GitHub repository info
+# GitHub repository info (overridable via --repo-owner / --repo-url)
 REPO_OWNER="stackia"
 REPO_NAME="rtp2httpd"
-GITHUB_API="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}"
-GITHUB_RELEASE="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download"
-SOURCE_REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+SOURCE_REPO_URL=""
 
 # Installation paths
 INSTALL_DIR="/usr/local/bin"
@@ -368,6 +366,16 @@ parse_args() {
                 fi
                 shift
                 ;;
+            --repo-owner)
+                if [ -n "${2:-}" ]; then
+                    REPO_OWNER="$2"
+                    shift
+                else
+                    print_error "$(msg '--repo-owner 需要指定 GitHub 用户名或组织名' '--repo-owner requires a GitHub username or organization')"
+                    exit 1
+                fi
+                shift
+                ;;
             --help|-h)
                 echo "$(msg '用法' 'Usage'): $0 [$(msg '选项' 'options')]"
                 echo ""
@@ -376,7 +384,8 @@ parse_args() {
                 echo "  --version <vX.Y.Z>  $(msg '安装指定版本' 'Install a specific version')"
                 echo "  --no-service    $(msg '跳过创建和启用 systemd 服务' 'Skip creating and enabling systemd service')"
                 echo "  --from-source <ref>  $(msg '从源码构建安装指定分支/标签/commit，而非下载 Release 二进制文件' 'Build and install from source at this branch/tag/commit, instead of downloading a release binary')"
-                echo "  --repo-url <url>  $(msg "配合 --from-source 使用，指定要克隆的仓库地址（默认: ${SOURCE_REPO_URL}）" "Used with --from-source, the repository URL to clone (default: ${SOURCE_REPO_URL})")"
+                echo "  --repo-owner <owner>  $(msg "GitHub 仓库所有者，用于下载 Release 或（配合 --from-source）克隆源码（默认: ${REPO_OWNER}）" "GitHub repository owner, used for downloading releases or (with --from-source) cloning source (default: ${REPO_OWNER})")"
+                echo "  --repo-url <url>  $(msg '配合 --from-source 使用，完整指定要克隆的仓库地址（优先于 --repo-owner）' 'Used with --from-source, the full repository URL to clone (overrides --repo-owner)')"
                 echo "  --help, -h      $(msg '显示此帮助信息' 'Show help')"
                 echo ""
                 exit 0
@@ -390,6 +399,14 @@ parse_args() {
 }
 
 main() {
+    # Computed here (not at top-level) so --repo-owner/--repo-url overrides,
+    # parsed by parse_args before main() runs, take effect.
+    GITHUB_API="https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}"
+    GITHUB_RELEASE="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/download"
+    if [ -z "$SOURCE_REPO_URL" ]; then
+        SOURCE_REPO_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+    fi
+
     print_info "=========================================="
     print_info "$(msg 'rtp2httpd Armbian Quick Installer' 'rtp2httpd Armbian Quick Installer')"
     print_info "=========================================="
