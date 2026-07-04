@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <unistd.h>
 
 #define MAX_LINE 4096
 
@@ -1701,4 +1702,198 @@ void parse_cmd_line(int argc, char *argv[]) {
   }
 
   logger(LOG_DEBUG, "Verbosity: %d, Maxclients: %d, Workers: %d", config.verbosity, config.maxclients, config.workers);
+}
+
+/* True if `line` is an ACTIVE (non-commented) assignment for `key`. Commented
+ * example/alternative lines (starting with ';' or '#') are never matched, so
+ * they're preserved untouched as documentation. */
+static int line_is_active_key(const char *line, const char *key) {
+  const char *p = line;
+  size_t key_len = strlen(key);
+
+  while (*p == ' ' || *p == '\t')
+    p++;
+  if (*p == ';' || *p == '#')
+    return 0;
+  if (strncasecmp(p, key, key_len) != 0)
+    return 0;
+  p += key_len;
+  while (*p == ' ' || *p == '\t')
+    p++;
+  return *p == '=' || *p == '\0';
+}
+
+int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size_t n_kvs,
+                                  const char **listen_lines, size_t n_listen) {
+  char *content;
+  long size = 0;
+  FILE *f = fopen(path, "r");
+
+  if (f) {
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    content = malloc((size_t)size + 1);
+    if (!content) {
+      fclose(f);
+      return -1;
+    }
+    if (fread(content, 1, (size_t)size, f) != (size_t)size) {
+      fclose(f);
+      free(content);
+      return -1;
+    }
+    content[size] = '\0';
+    fclose(f);
+  } else {
+    content = strdup("[global]\n");
+    if (!content)
+      return -1;
+  }
+
+  int *applied = calloc(n_kvs > 0 ? n_kvs : 1, sizeof(int));
+  if (!applied) {
+    free(content);
+    return -1;
+  }
+
+  size_t out_cap = (size_t)size + 65536;
+  char *out = malloc(out_cap);
+  if (!out) {
+    free(content);
+    free(applied);
+    return -1;
+  }
+  size_t out_len = 0;
+
+  int in_global = 0, in_bind = 0, has_global = 0, has_bind = 0;
+  /* Manual line splitting (not strtok_r): strtok_r treats runs of
+   * consecutive delimiters as one, silently dropping blank lines, which
+   * would violate byte-for-byte preservation of the rest of the file. */
+  char *content_end = content + strlen(content);
+  char *line = content;
+
+  while (line < content_end) {
+    char *next_nl = strchr(line, '\n');
+    if (next_nl)
+      *next_nl = '\0';
+
+    const char *t = line;
+    while (*t == ' ' || *t == '\t')
+      t++;
+
+    if (t[0] == '[') {
+      if (in_global) {
+        for (size_t i = 0; i < n_kvs; i++) {
+          if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
+            out_len += snprintf(out + out_len, out_cap - out_len, "%s = %s\n", kvs[i].key, kvs[i].value);
+            applied[i] = 1;
+          }
+        }
+      }
+      if (in_bind) {
+        for (size_t i = 0; i < n_listen; i++)
+          out_len += snprintf(out + out_len, out_cap - out_len, "%s\n", listen_lines[i]);
+        if (n_listen == 0)
+          out_len += snprintf(out + out_len, out_cap - out_len, "* 5140\n");
+      }
+
+      in_global = strncasecmp(t, "[global]", 8) == 0;
+      in_bind = strncasecmp(t, "[bind]", 6) == 0;
+      if (in_global)
+        has_global = 1;
+      if (in_bind)
+        has_bind = 1;
+
+      out_len += snprintf(out + out_len, out_cap - out_len, "%s\n", line);
+      line = next_nl ? next_nl + 1 : content_end;
+      continue;
+    }
+
+    if (in_bind) {
+      line = next_nl ? next_nl + 1 : content_end;
+      continue;
+    }
+
+    if (in_global) {
+      int matched = 0;
+      for (size_t i = 0; i < n_kvs; i++) {
+        if (line_is_active_key(t, kvs[i].key)) {
+          matched = 1;
+          if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
+            out_len += snprintf(out + out_len, out_cap - out_len, "%s = %s\n", kvs[i].key, kvs[i].value);
+          }
+          applied[i] = 1;
+          break;
+        }
+      }
+      if (matched) {
+        line = next_nl ? next_nl + 1 : content_end;
+        continue;
+      }
+    }
+
+    out_len += snprintf(out + out_len, out_cap - out_len, "%s\n", line);
+    line = next_nl ? next_nl + 1 : content_end;
+  }
+
+  if (in_global) {
+    for (size_t i = 0; i < n_kvs; i++) {
+      if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
+        out_len += snprintf(out + out_len, out_cap - out_len, "%s = %s\n", kvs[i].key, kvs[i].value);
+        applied[i] = 1;
+      }
+    }
+  }
+  if (in_bind) {
+    for (size_t i = 0; i < n_listen; i++)
+      out_len += snprintf(out + out_len, out_cap - out_len, "%s\n", listen_lines[i]);
+    if (n_listen == 0)
+      out_len += snprintf(out + out_len, out_cap - out_len, "* 5140\n");
+  }
+
+  if (!has_global) {
+    out_len += snprintf(out + out_len, out_cap - out_len, "[global]\n");
+    for (size_t i = 0; i < n_kvs; i++) {
+      if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
+        out_len += snprintf(out + out_len, out_cap - out_len, "%s = %s\n", kvs[i].key, kvs[i].value);
+        applied[i] = 1;
+      }
+    }
+  }
+
+  if (!has_bind) {
+    out_len += snprintf(out + out_len, out_cap - out_len, "[bind]\n");
+    for (size_t i = 0; i < n_listen; i++)
+      out_len += snprintf(out + out_len, out_cap - out_len, "%s\n", listen_lines[i]);
+    if (n_listen == 0)
+      out_len += snprintf(out + out_len, out_cap - out_len, "* 5140\n");
+  }
+
+  free(content);
+  free(applied);
+
+  char tmp_path[1024];
+  snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+  FILE *out_f = fopen(tmp_path, "w");
+  if (!out_f) {
+    free(out);
+    return -1;
+  }
+  size_t written = fwrite(out, 1, out_len, out_f);
+  fflush(out_f);
+  fsync(fileno(out_f));
+  fclose(out_f);
+  free(out);
+
+  if (written != out_len) {
+    unlink(tmp_path);
+    return -1;
+  }
+  if (rename(tmp_path, path) != 0) {
+    unlink(tmp_path);
+    return -1;
+  }
+
+  return 0;
 }
