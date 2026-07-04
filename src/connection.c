@@ -7,6 +7,7 @@
 #include "platform_compat.h"
 #include "poller.h"
 #include "service.h"
+#include "settings_api.h"
 #include "status.h"
 #include "utils.h"
 #include "zerocopy.h"
@@ -931,6 +932,38 @@ int connection_route_and_start(connection_t *c) {
   size_t player_route_len = strlen(player_route);
   if (player_route_len == path_len && strncmp(service_path, player_route, path_len) == 0) {
     handle_embedded_file(c, "/player.html");
+    return 0;
+  }
+
+  /* Handle setting page */
+  const char *setting_route = config.setting_page_route ? config.setting_page_route : "setting";
+  size_t setting_route_len = strlen(setting_route);
+  if (setting_route_len == path_len && strncmp(service_path, setting_route, path_len) == 0) {
+    handle_embedded_file(c, "/setting.html");
+    return 0;
+  }
+
+  char setting_api_prefix[HTTP_URL_BUFFER_SIZE];
+  if (setting_route_len > 0) {
+    snprintf(setting_api_prefix, sizeof(setting_api_prefix), "%s/api/", setting_route);
+  } else {
+    strncpy(setting_api_prefix, "api/", sizeof(setting_api_prefix) - 1);
+    setting_api_prefix[sizeof(setting_api_prefix) - 1] = '\0';
+  }
+  size_t setting_api_prefix_len = strlen(setting_api_prefix);
+  if (path_len >= setting_api_prefix_len && strncmp(service_path, setting_api_prefix, setting_api_prefix_len) == 0) {
+    const char *api_name = service_path + setting_api_prefix_len;
+    size_t api_name_len = path_len - setting_api_prefix_len;
+
+    if (api_name_len == strlen("get-config") && strncmp(api_name, "get-config", api_name_len) == 0) {
+      handle_get_config(c);
+      return 0;
+    }
+    if (api_name_len == strlen("save-config") && strncmp(api_name, "save-config", api_name_len) == 0) {
+      handle_save_config(c);
+      return 0;
+    }
+    http_send_404(c);
     return 0;
   }
 

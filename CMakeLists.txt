@@ -55,6 +55,7 @@ set(COMMON_SOURCES
   src/snapshot.c
   src/timezone.c
   src/status.c
+  src/settings_api.c
   src/connection.c
   src/worker.c
   src/unix_socket.c

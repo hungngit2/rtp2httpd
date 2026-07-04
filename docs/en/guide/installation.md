@@ -22,6 +22,12 @@ curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/inst
 ```
 
 The script installs the binary to `/usr/local/bin/rtp2httpd`, writes the default config to `/etc/rtp2httpd.conf`, and creates `/etc/systemd/system/rtp2httpd.service`.
+
+After installation, open `http://<device-ip>:5140/setting` in a browser to access the settings page and change configuration without SSH access (changes take effect automatically after saving).
+
+> [!WARNING]
+> The settings page has no authentication by default. If your device is reachable from an untrusted network (e.g. the public internet or an untrusted LAN), configure [`r2h-token`](../reference/configuration.md) before exposing the port — otherwise anyone who can reach it can change your configuration, including the `ffmpeg-args` value used by the video snapshot feature, which could be abused to execute arbitrary commands.
+
 ## Static Binary Deployment
 
 Download the static binary file `rtp2httpd-<version>-<arch>` for your architecture from the [Releases](https://github.com/stackia/rtp2httpd/releases) page, upload to your device, `chmod +x` and run.

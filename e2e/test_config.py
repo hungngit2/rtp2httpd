@@ -5,6 +5,7 @@ Tests cover command-line flags, config file sections, default values,
 and precedence rules.
 """
 
+import json
 import time  # needed for TestMaxClients deadline loop
 
 import pytest
@@ -852,3 +853,89 @@ class TestQuietMode:
             assert status == 200
         finally:
             r2h.stop()
+
+
+def test_get_config_endpoint_reflects_running_config(r2h_binary):
+    port = find_free_port()
+    config = f"""\
+[global]
+verbosity = 3
+maxclients = 7
+hostname = example.test
+
+[bind]
+* {port}
+"""
+    r2h = R2HProcess(r2h_binary, port, config_content=config)
+    r2h.start()
+    try:
+        status, _, body = http_get("127.0.0.1", port, "/setting/api/get-config")
+        assert status == 200
+        data = json.loads(body)
+        assert data["maxclients"] == 7
+        assert data["hostname"] == "example.test"
+        assert data["verbosity"] == 3
+        assert data["listen"] == [str(port)]
+    finally:
+        r2h.stop()
+
+
+def test_save_config_updates_file_and_reloads(r2h_binary):
+    port = find_free_port()
+    config = f"""\
+[global]
+verbosity = 2
+maxclients = 5
+
+[bind]
+* {port}
+
+[services]
+#EXTM3U
+#EXTINF:-1,Test
+rtp://239.0.0.1:1234
+"""
+    r2h = R2HProcess(r2h_binary, port, config_content=config)
+    r2h.start()
+    try:
+        status, _, body = http_request(
+            "127.0.0.1",
+            port,
+            "POST",
+            "/setting/api/save-config",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=b"maxclients=42&hostname=example.test",
+        )
+        assert status == 200
+        data = json.loads(body)
+        assert data["success"] is True
+
+        with open(r2h._config_path) as f:
+            saved = f.read()
+        assert "maxclients = 42" in saved
+        assert "hostname = example.test" in saved
+        assert "#EXTINF:-1,Test" in saved  # [services] untouched
+        assert "rtp://239.0.0.1:1234" in saved
+    finally:
+        r2h.stop()
+
+
+def test_save_config_rejects_newline_injection(r2h_binary):
+    port = find_free_port()
+    config = f"[global]\nverbosity = 2\n\n[bind]\n* {port}\n"
+    r2h = R2HProcess(r2h_binary, port, config_content=config)
+    r2h.start()
+    try:
+        status, _, body = http_request(
+            "127.0.0.1",
+            port,
+            "POST",
+            "/setting/api/save-config",
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            body=b"hostname=evil%0D%0Ar2h-token=hacked",
+        )
+        assert status == 400
+        data = json.loads(body)
+        assert data["success"] is False
+    finally:
+        r2h.stop()

@@ -203,8 +203,10 @@ create_default_config() {
 # rtp2httpd default config
 [global]
 verbosity = 2
-#listen = 0.0.0.0:5140
 #maxclients = 20
+
+[bind]
+* 5140
 EOF
 }
 

@@ -46,6 +46,7 @@ The installer downloads the latest release binary, installs it to `/usr/local/bi
 - **Client connection stats**: Shows each connection's IP, status, bandwidth usage, and total data transferred
 - **System log viewer**: View server logs in real time, with adjustable log verbosity
 - **Remote management**: Force-disconnect clients from the web interface
+- **Settings page**: Change global configuration from your browser at `http://<server:port>/setting`, no config-file editing or manual restart required
 
 ### 🎬 Built-in Player
 
