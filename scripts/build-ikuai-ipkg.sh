@@ -26,7 +26,7 @@ download_binary() {
   arch=$1
   output=$2
   binary_name="rtp2httpd-$VERSION-$arch"
-  release_url="https://github.com/stackia/rtp2httpd/releases/download/v$VERSION/$binary_name"
+  release_url="https://github.com/hungngit2/rtp2httpd/releases/download/v$VERSION/$binary_name"
 
   if command -v curl >/dev/null 2>&1; then
     curl -fL "$release_url" -o "$output"

@@ -12,7 +12,7 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
 # GitHub repository info
-REPO_OWNER="stackia"
+REPO_OWNER="hungngit2"
 REPO_NAME="rtp2httpd"
 
 # GitHub access configuration (set after user selection)

@@ -4,7 +4,7 @@ set -e
 RELEASE_VERSION=${RELEASE_VERSION:-"1.0.0-snapshot"}
 
 # Download source tarball and compute PKG_HASH
-PKG_SOURCE_URL="https://codeload.github.com/stackia/rtp2httpd/tar.gz/v${RELEASE_VERSION}"
+PKG_SOURCE_URL="https://codeload.github.com/hungngit2/rtp2httpd/tar.gz/v${RELEASE_VERSION}"
 TARBALL=$(mktemp)
 trap 'rm -f "$TARBALL"' EXIT
 curl -fsSL -o "$TARBALL" "$PKG_SOURCE_URL"
@@ -37,7 +37,7 @@ awk -v version="$RELEASE_VERSION" -v pkg_hash="$PKG_HASH" '
   # Add PKG_SOURCE lines before include $(INCLUDE_DIR)/package.mk
   /^include \$\(INCLUDE_DIR\)\/package\.mk$/ {
     print "PKG_SOURCE:=rtp2httpd-v$(RELEASE_VERSION).tar.gz"
-    print "PKG_SOURCE_URL:=https://codeload.github.com/stackia/rtp2httpd/tar.gz/v$(RELEASE_VERSION)?"
+    print "PKG_SOURCE_URL:=https://codeload.github.com/hungngit2/rtp2httpd/tar.gz/v$(RELEASE_VERSION)?"
     print "PKG_HASH:=" pkg_hash
     print ""
   }
