@@ -864,11 +864,16 @@ int connection_route_and_start(connection_t *c) {
     logger(LOG_DEBUG, "Host header validated: %s", c->http_req.hostname);
   }
 
-  if (strip_app_path_prefix(url, internal_url_buf, sizeof(internal_url_buf)) != 0) {
-    http_send_404(c);
-    return 0;
+  /* app-path-prefix, when configured, is an additional way to reach every
+   * route -- pages, assets, APIs, and media/service routes (rtp/, rtsp/,
+   * http/, udp/, playlist.m3u, etc.) all stay reachable at their bare paths
+   * too. This matters for streams especially: other IPTV client apps and
+   * existing playlists often have those URLs hardcoded without any
+   * reverse-proxy prefix. When the prefix doesn't match, keep the original
+   * URL for dispatch below instead of rejecting the request. */
+  if (strip_app_path_prefix(url, internal_url_buf, sizeof(internal_url_buf)) == 0) {
+    url = internal_url_buf;
   }
-  url = internal_url_buf;
 
   /* Handle CORS preflight (OPTIONS) before r2h-token check */
   if (config.cors_allow_origin && config.cors_allow_origin[0] && strcasecmp(c->http_req.method, "OPTIONS") == 0) {
@@ -900,29 +905,9 @@ int connection_route_and_start(connection_t *c) {
   if (path_len > 0 && service_path[path_len - 1] == '/')
     path_len--;
 
-  /* Handle static assets first (bypass r2h-token validation for /assets/) */
-  const char *assets_prefix = "assets/";
-  size_t assets_prefix_len = strlen(assets_prefix);
-  if (path_len >= assets_prefix_len && strncmp(service_path, assets_prefix, assets_prefix_len) == 0) {
-    /* Reconstruct full path with leading slash */
-    char asset_path[HTTP_URL_BUFFER_SIZE];
-    snprintf(asset_path, sizeof(asset_path), "/%.*s", (int)path_len, service_path);
-    handle_embedded_file(c, asset_path);
-    return 0;
-  }
-
-  /* Check r2h-token if configured (supports URL query, Cookie, User-Agent) */
-  if (config.r2h_token != NULL && config.r2h_token[0] != '\0') {
-    const char *raw_query_start = strchr(c->http_req.url, '?');
-    token_source_t source = validate_r2h_token(c, query_start, raw_query_start);
-    if (source == TOKEN_SOURCE_NONE) {
-      http_send_401(c);
-      return 0;
-    }
-    /* Set cookie only when token was provided via URL query (first visit) */
-    c->should_set_r2h_cookie = (source == TOKEN_SOURCE_QUERY);
-  }
-
+  /* status_route/status_sse_route/status_api_prefix are declared here since
+   * the status SSE/API routes are matched further down, after playlist.m3u
+   * and epg.xml. */
   const char *status_route = config.status_page_route ? config.status_page_route : "status";
   size_t status_route_len = strlen(status_route);
   char status_sse_route[HTTP_URL_BUFFER_SIZE];
@@ -936,6 +921,30 @@ int connection_route_and_start(connection_t *c) {
     status_sse_route[sizeof(status_sse_route) - 1] = '\0';
     strncpy(status_api_prefix, "api/", sizeof(status_api_prefix) - 1);
     status_api_prefix[sizeof(status_api_prefix) - 1] = '\0';
+  }
+
+  /* Handle static assets first (bypass r2h-token validation for /assets/) */
+  const char *assets_prefix = "assets/";
+  size_t assets_prefix_len = strlen(assets_prefix);
+  if (path_len >= assets_prefix_len && strncmp(service_path, assets_prefix, assets_prefix_len) == 0) {
+    /* Reconstruct full path with leading slash */
+    char asset_path[HTTP_URL_BUFFER_SIZE];
+    snprintf(asset_path, sizeof(asset_path), "/%.*s", (int)path_len, service_path);
+    handle_embedded_file(c, asset_path);
+    return 0;
+  }
+
+  /* Check r2h-token if configured (supports URL query, Cookie, User-Agent).
+   * Applies to all remaining routes -- pages AND streams/services alike. */
+  if (config.r2h_token != NULL && config.r2h_token[0] != '\0') {
+    const char *raw_query_start = strchr(c->http_req.url, '?');
+    token_source_t source = validate_r2h_token(c, query_start, raw_query_start);
+    if (source == TOKEN_SOURCE_NONE) {
+      http_send_401(c);
+      return 0;
+    }
+    /* Set cookie only when token was provided via URL query (first visit) */
+    c->should_set_r2h_cookie = (source == TOKEN_SOURCE_QUERY);
   }
 
   if (status_route_len == path_len && strncmp(service_path, status_route, path_len) == 0) {
@@ -1069,7 +1078,7 @@ int connection_route_and_start(connection_t *c) {
   /* Dynamic parsing for RTSP and UDPxy if needed */
   if (service == NULL) {
     if (config.udpxy) {
-      service = service_create_from_udpxy_url(internal_url_buf);
+      service = service_create_from_udpxy_url(url);
     }
   } else {
     /* Found configured service (RTP or RTSP) - merge with request query (or

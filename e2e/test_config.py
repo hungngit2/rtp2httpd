@@ -109,8 +109,10 @@ def _assert_app_path_prefix(port: int, expected_prefix: str):
     normalized = "/" + expected_prefix.strip("/")
     status, _, _ = http_get("127.0.0.1", port, f"{normalized}/status")
     assert status == 200
+    # app-path-prefix is an *additional* way to reach every route, not an
+    # exclusive gate -- the bare path stays reachable too.
     status2, _, _ = http_get("127.0.0.1", port, "/status")
-    assert status2 == 404
+    assert status2 == 200
 
 
 def _assert_hostname(port: int, expected_hosts: tuple[str, str]):
@@ -871,9 +873,7 @@ hostname = example.test
     try:
         # hostname is configured above, so the request's Host header must match it
         # (see the `hostname` config option's Host-header enforcement).
-        status, _, body = http_get(
-            "127.0.0.1", port, "/setting/api/get-config", headers={"Host": "example.test"}
-        )
+        status, _, body = http_get("127.0.0.1", port, "/setting/api/get-config", headers={"Host": "example.test"})
         assert status == 200
         data = json.loads(body)
         assert data["maxclients"] == 7

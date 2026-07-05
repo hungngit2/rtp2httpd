@@ -253,7 +253,7 @@ typedef struct {
  *
  * @return 0 on success, -1 on I/O error
  */
-int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size_t n_kvs,
-                                  const char **listen_lines, size_t n_listen);
+int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size_t n_kvs, const char **listen_lines,
+                                 size_t n_listen);
 
 #endif /* __CONFIGURATION_H__ */
