@@ -976,8 +976,7 @@ int connection_route_and_start(connection_t *c) {
     setting_api_prefix[sizeof(setting_api_prefix) - 1] = '\0';
   }
   size_t setting_api_prefix_len = strlen(setting_api_prefix);
-  if (path_len >= setting_api_prefix_len &&
-      strncmp(service_path, setting_api_prefix, setting_api_prefix_len) == 0) {
+  if (path_len >= setting_api_prefix_len && strncmp(service_path, setting_api_prefix, setting_api_prefix_len) == 0) {
     const char *api_name = service_path + setting_api_prefix_len;
     size_t api_name_len = path_len - setting_api_prefix_len;
 

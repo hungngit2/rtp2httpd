@@ -182,22 +182,22 @@ void handle_get_config(connection_t *c) {
     return;
   }
 
-#define GC_APPEND(...)                                          \
-  do {                                                          \
-    if (json_out_append(&out, &out_cap, &out_len, __VA_ARGS__) != 0) { \
-      free(out);                                                \
-      send_json_error(c, STATUS_500, "Out of memory");          \
-      return;                                                   \
-    }                                                            \
+#define GC_APPEND(...)                                                                                                 \
+  do {                                                                                                                 \
+    if (json_out_append(&out, &out_cap, &out_len, __VA_ARGS__) != 0) {                                                 \
+      free(out);                                                                                                       \
+      send_json_error(c, STATUS_500, "Out of memory");                                                                 \
+      return;                                                                                                          \
+    }                                                                                                                  \
   } while (0)
 
-#define GC_APPEND_ESCAPED(str)                                          \
-  do {                                                                  \
-    if (json_out_append_escaped_string(&out, &out_cap, &out_len, (str)) != 0) { \
-      free(out);                                                        \
-      send_json_error(c, STATUS_500, "Out of memory");                  \
-      return;                                                           \
-    }                                                                    \
+#define GC_APPEND_ESCAPED(str)                                                                                         \
+  do {                                                                                                                 \
+    if (json_out_append_escaped_string(&out, &out_cap, &out_len, (str)) != 0) {                                        \
+      free(out);                                                                                                       \
+      send_json_error(c, STATUS_500, "Out of memory");                                                                 \
+      return;                                                                                                          \
+    }                                                                                                                  \
   } while (0)
 
   GC_APPEND("{");
@@ -273,9 +273,7 @@ void handle_get_config(connection_t *c) {
 
 /* Rejects values containing raw newlines, which would corrupt the line-based
  * INI format or let a form field inject extra config lines. */
-static int value_has_newline(const char *value) {
-  return value && strpbrk(value, "\r\n") != NULL;
-}
+static int value_has_newline(const char *value) { return value && strpbrk(value, "\r\n") != NULL; }
 
 static void send_json_error(connection_t *c, int status, const char *message) {
   char response[256];
@@ -319,8 +317,8 @@ void handle_save_config(connection_t *c) {
       n_kvs++;
     }
   }
-  if (http_parse_query_param(c->http_req.body, "fcc-listen-port-range", value_bufs[n_kvs],
-                              sizeof(value_bufs[n_kvs])) == 0) {
+  if (http_parse_query_param(c->http_req.body, "fcc-listen-port-range", value_bufs[n_kvs], sizeof(value_bufs[n_kvs])) ==
+      0) {
     if (value_has_newline(value_bufs[n_kvs])) {
       send_json_error(c, STATUS_400, "Field value must not contain newlines");
       return;

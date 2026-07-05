@@ -62,7 +62,13 @@ int cmd_log_format_set = 0;
 
 enum section_e { SEC_NONE = 0, SEC_BIND, SEC_SERVICES, SEC_GLOBAL };
 
-enum long_option_e { OPT_APP_PATH_PREFIX = 1000, OPT_USE_RELATIVE_PATH_IN_M3U, OPT_ACCESS_LOG, OPT_LOG_FORMAT, OPT_SETTING_PAGE_PATH };
+enum long_option_e {
+  OPT_APP_PATH_PREFIX = 1000,
+  OPT_USE_RELATIVE_PATH_IN_M3U,
+  OPT_ACCESS_LOG,
+  OPT_LOG_FORMAT,
+  OPT_SETTING_PAGE_PATH
+};
 
 /* M3U parsing state variables */
 static char *inline_m3u_buffer = NULL;
@@ -1755,8 +1761,8 @@ static int out_append(char **out, size_t *out_cap, size_t *out_len, const char *
   return 0;
 }
 
-int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size_t n_kvs,
-                                  const char **listen_lines, size_t n_listen) {
+int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size_t n_kvs, const char **listen_lines,
+                                 size_t n_listen) {
   char *content;
   size_t content_len;
   long size = 0;
@@ -1807,14 +1813,14 @@ int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size
 
 /* All OUT_APPEND call sites below run before `content`/`applied` are freed,
  * so the cleanup is identical everywhere. */
-#define OUT_APPEND(...)                                                 \
-  do {                                                                  \
-    if (out_append(&out, &out_cap, &out_len, __VA_ARGS__) != 0) {       \
-      free(content);                                                    \
-      free(applied);                                                    \
-      free(out);                                                        \
-      return -1;                                                        \
-    }                                                                    \
+#define OUT_APPEND(...)                                                                                                \
+  do {                                                                                                                 \
+    if (out_append(&out, &out_cap, &out_len, __VA_ARGS__) != 0) {                                                      \
+      free(content);                                                                                                   \
+      free(applied);                                                                                                   \
+      free(out);                                                                                                       \
+      return -1;                                                                                                       \
+    }                                                                                                                  \
   } while (0)
 
   int in_global = 0, in_bind = 0, has_global = 0, has_bind = 0;
