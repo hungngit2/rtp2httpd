@@ -16,7 +16,7 @@ export RELEASE_VERSION
 
 PKG_SOURCE:=rtp2httpd-v$(RELEASE_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/hungngit2/rtp2httpd/tar.gz/v$(RELEASE_VERSION)?
-PKG_HASH:=75175993436177bc4acbbd83225a3228fecd17681d3937328f6e7f341d634ec0
+PKG_HASH:=1da91550a6efe9c8dd341e003bad7f0bc90c22f5eba04d03542f352dec8cf163
 
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/cmake.mk
