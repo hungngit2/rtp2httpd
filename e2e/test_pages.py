@@ -13,6 +13,7 @@ from helpers import (
     find_free_port,
     get_header,
     http_get,
+    http_request,
     stream_get,
     write_temp_file,
 )
@@ -287,13 +288,37 @@ class TestAppPathPrefix:
             "/status",
             "/player",
             "/assets/icon.png",
-            "/playlist.m3u",
             "/app/rtp2httpd2/status",
         ],
     )
     def test_unprefixed_or_boundary_mismatch_routes_404(self, prefixed_r2h, path):
+        """Web pages/assets/APIs still strictly require app-path-prefix."""
         status, _, _ = http_get("127.0.0.1", prefixed_r2h.port, path)
         assert status == 404
+
+    def test_unprefixed_playlist_still_reachable(self, prefixed_r2h):
+        """Media/service routes (playlist.m3u, epg.xml, rtp/, etc.) stay reachable
+        bare too, since some IPTV client apps have those URLs hardcoded without
+        any reverse-proxy prefix -- unlike pages, which still require the prefix."""
+        status, _, body = http_get("127.0.0.1", prefixed_r2h.port, "/playlist.m3u")
+        assert status == 200
+        assert b"#EXTM3U" in body
+
+        status, _, _ = http_get("127.0.0.1", prefixed_r2h.port, "/epg.xml")
+        assert status == 200
+
+    def test_stream_route_reachable_both_prefixed_and_bare(self, prefixed_r2h):
+        """A configured stream (rtp/) must be reachable both with and without
+        app-path-prefix, since some IPTV client apps hardcode bare stream URLs."""
+        status, _, _ = http_request(
+            "127.0.0.1", prefixed_r2h.port, "HEAD", "/rtp/239.0.0.1:1234", timeout=3.0
+        )
+        assert status == 200
+
+        status, _, _ = http_request(
+            "127.0.0.1", prefixed_r2h.port, "HEAD", f"{APP_PREFIX}/rtp/239.0.0.1:1234", timeout=3.0
+        )
+        assert status == 200
 
     def test_token_cookie_path_uses_app_prefix(self, r2h_binary):
         port = find_free_port()

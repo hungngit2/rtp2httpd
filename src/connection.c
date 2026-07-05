@@ -864,11 +864,20 @@ int connection_route_and_start(connection_t *c) {
     logger(LOG_DEBUG, "Host header validated: %s", c->http_req.hostname);
   }
 
-  if (strip_app_path_prefix(url, internal_url_buf, sizeof(internal_url_buf)) != 0) {
-    http_send_404(c);
-    return 0;
+  /* Web pages/assets/APIs require app-path-prefix (if configured) as before.
+   * Media/service routes (rtp/, rtsp/, http/, udp/, playlist.m3u, etc.) stay
+   * reachable at their bare paths too -- some IPTV client apps have those
+   * URLs hardcoded without any reverse-proxy prefix. When the prefix
+   * doesn't match, keep the original URL for that stream/service dispatch
+   * below instead of rejecting the request outright; `pages_reachable`
+   * still gates the web-page routes below to require the prefix whenever
+   * one is configured. */
+  int prefix_matched = strip_app_path_prefix(url, internal_url_buf, sizeof(internal_url_buf)) == 0;
+  int has_app_path_prefix = config.app_path_prefix && config.app_path_prefix[0] != '\0';
+  int pages_reachable = prefix_matched || !has_app_path_prefix;
+  if (prefix_matched) {
+    url = internal_url_buf;
   }
-  url = internal_url_buf;
 
   /* Handle CORS preflight (OPTIONS) before r2h-token check */
   if (config.cors_allow_origin && config.cors_allow_origin[0] && strcasecmp(c->http_req.method, "OPTIONS") == 0) {
@@ -900,29 +909,10 @@ int connection_route_and_start(connection_t *c) {
   if (path_len > 0 && service_path[path_len - 1] == '/')
     path_len--;
 
-  /* Handle static assets first (bypass r2h-token validation for /assets/) */
-  const char *assets_prefix = "assets/";
-  size_t assets_prefix_len = strlen(assets_prefix);
-  if (path_len >= assets_prefix_len && strncmp(service_path, assets_prefix, assets_prefix_len) == 0) {
-    /* Reconstruct full path with leading slash */
-    char asset_path[HTTP_URL_BUFFER_SIZE];
-    snprintf(asset_path, sizeof(asset_path), "/%.*s", (int)path_len, service_path);
-    handle_embedded_file(c, asset_path);
-    return 0;
-  }
-
-  /* Check r2h-token if configured (supports URL query, Cookie, User-Agent) */
-  if (config.r2h_token != NULL && config.r2h_token[0] != '\0') {
-    const char *raw_query_start = strchr(c->http_req.url, '?');
-    token_source_t source = validate_r2h_token(c, query_start, raw_query_start);
-    if (source == TOKEN_SOURCE_NONE) {
-      http_send_401(c);
-      return 0;
-    }
-    /* Set cookie only when token was provided via URL query (first visit) */
-    c->should_set_r2h_cookie = (source == TOKEN_SOURCE_QUERY);
-  }
-
+  /* status_route/status_sse_route/status_api_prefix are declared here
+   * (outside the pages_reachable block below) because the status SSE/API
+   * routes are matched further down, after the ungated playlist.m3u/epg.xml
+   * routes. */
   const char *status_route = config.status_page_route ? config.status_page_route : "status";
   size_t status_route_len = strlen(status_route);
   char status_sse_route[HTTP_URL_BUFFER_SIZE];
@@ -938,49 +928,83 @@ int connection_route_and_start(connection_t *c) {
     status_api_prefix[sizeof(status_api_prefix) - 1] = '\0';
   }
 
-  if (status_route_len == path_len && strncmp(service_path, status_route, path_len) == 0) {
-    handle_embedded_file(c, "/status.html");
-    return 0;
-  }
-
-  /* Handle player page */
-  const char *player_route = config.player_page_route ? config.player_page_route : "player";
-  size_t player_route_len = strlen(player_route);
-  if (player_route_len == path_len && strncmp(service_path, player_route, path_len) == 0) {
-    handle_embedded_file(c, "/player.html");
-    return 0;
-  }
-
-  /* Handle setting page */
-  const char *setting_route = config.setting_page_route ? config.setting_page_route : "setting";
-  size_t setting_route_len = strlen(setting_route);
-  if (setting_route_len == path_len && strncmp(service_path, setting_route, path_len) == 0) {
-    handle_embedded_file(c, "/setting.html");
-    return 0;
-  }
-
-  char setting_api_prefix[HTTP_URL_BUFFER_SIZE];
-  if (setting_route_len > 0) {
-    snprintf(setting_api_prefix, sizeof(setting_api_prefix), "%s/api/", setting_route);
-  } else {
-    strncpy(setting_api_prefix, "api/", sizeof(setting_api_prefix) - 1);
-    setting_api_prefix[sizeof(setting_api_prefix) - 1] = '\0';
-  }
-  size_t setting_api_prefix_len = strlen(setting_api_prefix);
-  if (path_len >= setting_api_prefix_len && strncmp(service_path, setting_api_prefix, setting_api_prefix_len) == 0) {
-    const char *api_name = service_path + setting_api_prefix_len;
-    size_t api_name_len = path_len - setting_api_prefix_len;
-
-    if (api_name_len == strlen("get-config") && strncmp(api_name, "get-config", api_name_len) == 0) {
-      handle_get_config(c);
+  /* Web pages/assets/APIs require app-path-prefix (if configured); media and
+   * service routes stay reachable regardless -- but r2h-token (if configured)
+   * still applies unconditionally to everything except /assets/, matching
+   * the pre-existing security behavior for streams/services. */
+  if (pages_reachable) {
+    /* Handle static assets first (bypass r2h-token validation for /assets/) */
+    const char *assets_prefix = "assets/";
+    size_t assets_prefix_len = strlen(assets_prefix);
+    if (path_len >= assets_prefix_len && strncmp(service_path, assets_prefix, assets_prefix_len) == 0) {
+      /* Reconstruct full path with leading slash */
+      char asset_path[HTTP_URL_BUFFER_SIZE];
+      snprintf(asset_path, sizeof(asset_path), "/%.*s", (int)path_len, service_path);
+      handle_embedded_file(c, asset_path);
       return 0;
     }
-    if (api_name_len == strlen("save-config") && strncmp(api_name, "save-config", api_name_len) == 0) {
-      handle_save_config(c);
+  }
+
+  /* Check r2h-token if configured (supports URL query, Cookie, User-Agent).
+   * Applies to all remaining routes -- pages AND streams/services -- not
+   * gated by pages_reachable. */
+  if (config.r2h_token != NULL && config.r2h_token[0] != '\0') {
+    const char *raw_query_start = strchr(c->http_req.url, '?');
+    token_source_t source = validate_r2h_token(c, query_start, raw_query_start);
+    if (source == TOKEN_SOURCE_NONE) {
+      http_send_401(c);
       return 0;
     }
-    http_send_404(c);
-    return 0;
+    /* Set cookie only when token was provided via URL query (first visit) */
+    c->should_set_r2h_cookie = (source == TOKEN_SOURCE_QUERY);
+  }
+
+  if (pages_reachable) {
+    if (status_route_len == path_len && strncmp(service_path, status_route, path_len) == 0) {
+      handle_embedded_file(c, "/status.html");
+      return 0;
+    }
+
+    /* Handle player page */
+    const char *player_route = config.player_page_route ? config.player_page_route : "player";
+    size_t player_route_len = strlen(player_route);
+    if (player_route_len == path_len && strncmp(service_path, player_route, path_len) == 0) {
+      handle_embedded_file(c, "/player.html");
+      return 0;
+    }
+
+    /* Handle setting page */
+    const char *setting_route = config.setting_page_route ? config.setting_page_route : "setting";
+    size_t setting_route_len = strlen(setting_route);
+    if (setting_route_len == path_len && strncmp(service_path, setting_route, path_len) == 0) {
+      handle_embedded_file(c, "/setting.html");
+      return 0;
+    }
+
+    char setting_api_prefix[HTTP_URL_BUFFER_SIZE];
+    if (setting_route_len > 0) {
+      snprintf(setting_api_prefix, sizeof(setting_api_prefix), "%s/api/", setting_route);
+    } else {
+      strncpy(setting_api_prefix, "api/", sizeof(setting_api_prefix) - 1);
+      setting_api_prefix[sizeof(setting_api_prefix) - 1] = '\0';
+    }
+    size_t setting_api_prefix_len = strlen(setting_api_prefix);
+    if (path_len >= setting_api_prefix_len &&
+        strncmp(service_path, setting_api_prefix, setting_api_prefix_len) == 0) {
+      const char *api_name = service_path + setting_api_prefix_len;
+      size_t api_name_len = path_len - setting_api_prefix_len;
+
+      if (api_name_len == strlen("get-config") && strncmp(api_name, "get-config", api_name_len) == 0) {
+        handle_get_config(c);
+        return 0;
+      }
+      if (api_name_len == strlen("save-config") && strncmp(api_name, "save-config", api_name_len) == 0) {
+        handle_save_config(c);
+        return 0;
+      }
+      http_send_404(c);
+      return 0;
+    }
   }
 
   /* Handle /playlist.m3u request */
@@ -1004,39 +1028,41 @@ int connection_route_and_start(connection_t *c) {
     handle_epg_request(c, 0);
     return 0;
   }
-  size_t status_sse_len = strlen(status_sse_route);
-  if (status_sse_len == path_len && strncmp(service_path, status_sse_route, path_len) == 0) {
-    /* Delegate SSE initialization to status module */
-    return status_handle_sse_init(c);
-  }
-  size_t status_api_prefix_len = strlen(status_api_prefix);
-  if (path_len >= status_api_prefix_len && strncmp(service_path, status_api_prefix, status_api_prefix_len) == 0) {
-    const char *api_name = service_path + status_api_prefix_len;
-    size_t api_name_len = path_len - status_api_prefix_len;
+  if (pages_reachable) {
+    size_t status_sse_len = strlen(status_sse_route);
+    if (status_sse_len == path_len && strncmp(service_path, status_sse_route, path_len) == 0) {
+      /* Delegate SSE initialization to status module */
+      return status_handle_sse_init(c);
+    }
+    size_t status_api_prefix_len = strlen(status_api_prefix);
+    if (path_len >= status_api_prefix_len && strncmp(service_path, status_api_prefix, status_api_prefix_len) == 0) {
+      const char *api_name = service_path + status_api_prefix_len;
+      size_t api_name_len = path_len - status_api_prefix_len;
 
-    if (api_name_len == strlen("disconnect") && strncmp(api_name, "disconnect", api_name_len) == 0) {
-      handle_disconnect_client(c);
-      return 0;
-    }
-    if (api_name_len == strlen("log-level") && strncmp(api_name, "log-level", api_name_len) == 0) {
-      handle_set_log_level(c);
-      return 0;
-    }
-    if (api_name_len == strlen("clear-logs") && strncmp(api_name, "clear-logs", api_name_len) == 0) {
-      handle_clear_logs(c);
-      return 0;
-    }
-    if (api_name_len == strlen("reload-config") && strncmp(api_name, "reload-config", api_name_len) == 0) {
-      handle_reload_config(c);
-      return 0;
-    }
-    if (api_name_len == strlen("restart-workers") && strncmp(api_name, "restart-workers", api_name_len) == 0) {
-      handle_restart_workers(c);
-      return 0;
-    }
+      if (api_name_len == strlen("disconnect") && strncmp(api_name, "disconnect", api_name_len) == 0) {
+        handle_disconnect_client(c);
+        return 0;
+      }
+      if (api_name_len == strlen("log-level") && strncmp(api_name, "log-level", api_name_len) == 0) {
+        handle_set_log_level(c);
+        return 0;
+      }
+      if (api_name_len == strlen("clear-logs") && strncmp(api_name, "clear-logs", api_name_len) == 0) {
+        handle_clear_logs(c);
+        return 0;
+      }
+      if (api_name_len == strlen("reload-config") && strncmp(api_name, "reload-config", api_name_len) == 0) {
+        handle_reload_config(c);
+        return 0;
+      }
+      if (api_name_len == strlen("restart-workers") && strncmp(api_name, "restart-workers", api_name_len) == 0) {
+        handle_restart_workers(c);
+        return 0;
+      }
 
-    http_send_404(c);
-    return 0;
+      http_send_404(c);
+      return 0;
+    }
   }
 
   /* Find configured service (with URL decoding support) */
@@ -1069,7 +1095,7 @@ int connection_route_and_start(connection_t *c) {
   /* Dynamic parsing for RTSP and UDPxy if needed */
   if (service == NULL) {
     if (config.udpxy) {
-      service = service_create_from_udpxy_url(internal_url_buf);
+      service = service_create_from_udpxy_url(url);
     }
   } else {
     /* Found configured service (RTP or RTSP) - merge with request query (or
