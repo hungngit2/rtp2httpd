@@ -873,9 +873,7 @@ hostname = example.test
     try:
         # hostname is configured above, so the request's Host header must match it
         # (see the `hostname` config option's Host-header enforcement).
-        status, _, body = http_get(
-            "127.0.0.1", port, "/setting/api/get-config", headers={"Host": "example.test"}
-        )
+        status, _, body = http_get("127.0.0.1", port, "/setting/api/get-config", headers={"Host": "example.test"})
         assert status == 200
         data = json.loads(body)
         assert data["maxclients"] == 7
