@@ -869,7 +869,11 @@ hostname = example.test
     r2h = R2HProcess(r2h_binary, port, config_content=config)
     r2h.start()
     try:
-        status, _, body = http_get("127.0.0.1", port, "/setting/api/get-config")
+        # hostname is configured above, so the request's Host header must match it
+        # (see the `hostname` config option's Host-header enforcement).
+        status, _, body = http_get(
+            "127.0.0.1", port, "/setting/api/get-config", headers={"Host": "example.test"}
+        )
         assert status == 200
         data = json.loads(body)
         assert data["maxclients"] == 7
@@ -910,6 +914,7 @@ rtp://239.0.0.1:1234
         data = json.loads(body)
         assert data["success"] is True
 
+        assert r2h._config_path is not None
         with open(r2h._config_path) as f:
             saved = f.read()
         assert "maxclients = 42" in saved
