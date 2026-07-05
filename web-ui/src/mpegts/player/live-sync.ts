@@ -7,6 +7,14 @@ const TAG = "LiveSync";
 const UNDERRUN_BACKOFF_STEP = 1;
 /** Upper bound for the adaptive latency increase (seconds). */
 const UNDERRUN_BACKOFF_MAX = 6;
+/**
+ * Accumulated tolerance decays by this many seconds per second of stable
+ * (non-underrunning) playback. Without this, a tolerance spike only clears
+ * once latency drops under the *unpadded* target — which the capped 1.2x
+ * catch-up rate rarely achieves before the next underrun on a constrained
+ * device — so it would otherwise stay elevated indefinitely.
+ */
+const EXTRA_LATENCY_DECAY_PER_SEC = 0.05;
 
 /** Forward buffer seconds ahead of currentTime within the containing range. */
 function forwardBufferAhead(video: HTMLMediaElement): number {
@@ -37,12 +45,25 @@ export function setupLiveSync(
   }
 
   let extraLatency = 0;
+  // Baselined off video.currentTime (not wall clock): it naturally freezes
+  // while paused or stalled, so decay only progresses during real playback
+  // without needing an explicit video.paused check.
+  let lastDecayTime = video.currentTime;
 
   function onTimeUpdate(): void {
     if (!config.liveSync) return;
 
     const latency = getLiveEdgeLatency();
     if (latency === null) return;
+
+    const now = video.currentTime;
+    const dt = now - lastDecayTime;
+    lastDecayTime = now;
+    // dt<=0 covers seeks/discontinuities; dt>=1 guards against a large gap
+    // (e.g. tab backgrounded) decaying tolerance in one big jump.
+    if (extraLatency > 0 && dt > 0 && dt < 1) {
+      extraLatency = Math.max(0, extraLatency - EXTRA_LATENCY_DECAY_PER_SEC * dt);
+    }
 
     if (latency > config.liveSyncMaxLatency + extraLatency) {
       const targetRate = Math.min(2, Math.max(1, config.liveSyncPlaybackRate));
