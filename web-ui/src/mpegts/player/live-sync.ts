@@ -25,7 +25,6 @@ export function setupLiveSync(
   video: HTMLMediaElement,
   config: PlayerConfig,
   getLiveEdgeLatency: () => number | null,
-  onHardResyncNeeded?: () => void,
 ): () => void {
   if (config.liveSync) {
     Log.v(
@@ -81,19 +80,9 @@ export function setupLiveSync(
       video.playbackRate = 1;
     }
 
-    // Tolerance is already maxed out and we're still underrunning at the live edge:
-    // raising it further would just let latency drift indefinitely (it only comes back
-    // down once latency drops under the *unpadded* target, which the 1.2x catch-up rate
-    // rarely achieves before the next underrun). Force a buffered seek back to the live
-    // edge instead, mirroring the manual "Go Live" action.
-    if (extraLatency >= UNDERRUN_BACKOFF_MAX && onHardResyncNeeded) {
-      Log.w(TAG, "Live-edge underrun at max tolerance, forcing resync to live edge");
-      extraLatency = 0;
-      onHardResyncNeeded();
-      return;
+    if (extraLatency < UNDERRUN_BACKOFF_MAX) {
+      extraLatency = Math.min(extraLatency + UNDERRUN_BACKOFF_STEP, UNDERRUN_BACKOFF_MAX);
     }
-
-    extraLatency = Math.min(extraLatency + UNDERRUN_BACKOFF_STEP, UNDERRUN_BACKOFF_MAX);
     Log.w(
       TAG,
       `Live-edge underrun, raising latency tolerance: target ${(config.liveSyncTargetLatency + extraLatency).toFixed(1)}s, max ${(config.liveSyncMaxLatency + extraLatency).toFixed(1)}s`,

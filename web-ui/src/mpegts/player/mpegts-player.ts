@@ -307,13 +307,6 @@ export function createMpegtsPlayer(
     seekTo(targetMseSeconds);
   }
 
-  // For continuous-live-ts, goLiveTo recomputes its own buffered target and ignores
-  // this argument unless it falls back to a reload; video.currentTime is a harmless
-  // anchor either way. For other modes this is effectively a no-op seek.
-  function triggerLiveSyncHardResync(): void {
-    goLiveTo(video.currentTime);
-  }
-
   function inferSourceMode(segments: PlayerSegment[]): SourceMode {
     const firstSegment = segments[0];
     if (!firstSegment) {
@@ -411,7 +404,7 @@ export function createMpegtsPlayer(
 
   function initLiveHelpers(): void {
     if (!destroyLiveSync && liveSyncEnabled) {
-      destroyLiveSync = setupLiveSync(video, config, getLiveEdgeLatency, triggerLiveSyncHardResync);
+      destroyLiveSync = setupLiveSync(video, config, getLiveEdgeLatency);
     }
   }
 
@@ -449,7 +442,7 @@ export function createMpegtsPlayer(
     setLiveSync(enabled: boolean) {
       if (enabled && !destroyLiveSync) {
         liveSyncEnabled = true;
-        destroyLiveSync = setupLiveSync(video, config, getLiveEdgeLatency, triggerLiveSyncHardResync);
+        destroyLiveSync = setupLiveSync(video, config, getLiveEdgeLatency);
       } else if (!enabled && destroyLiveSync) {
         liveSyncEnabled = false;
         destroyLiveSync();
