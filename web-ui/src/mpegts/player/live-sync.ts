@@ -12,9 +12,11 @@ const UNDERRUN_BACKOFF_MAX = 6;
  * (non-underrunning) playback. Without this, a tolerance spike only clears
  * once latency drops under the *unpadded* target — which the capped 1.2x
  * catch-up rate rarely achieves before the next underrun on a constrained
- * device — so it would otherwise stay elevated indefinitely.
+ * device — so it would otherwise stay elevated indefinitely. At 0.2/sec, a
+ * maxed-out 6s backoff fully clears in ~30s of stable playback (0.05/sec
+ * took ~120s, which read as "still lagging" even though it was recovering).
  */
-const EXTRA_LATENCY_DECAY_PER_SEC = 0.05;
+const EXTRA_LATENCY_DECAY_PER_SEC = 0.2;
 
 /** Forward buffer seconds ahead of currentTime within the containing range. */
 function forwardBufferAhead(video: HTMLMediaElement): number {
