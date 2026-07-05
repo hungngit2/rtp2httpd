@@ -152,6 +152,13 @@ export class PCMAudioPlayer {
   /** Called when AudioContext is blocked by autoplay policy (needs user interaction). */
   onSuspended: (() => void) | null = null;
 
+  // Gesture-triggered resume: on some mobile browsers, calling resume() outside a
+  // real user gesture (as happens on programmatic autoplay) leaves the promise
+  // pending indefinitely instead of rejecting -- so onSuspended never fires and
+  // audio silently never starts. Retry resume() from the next real gesture too.
+  private gestureUnlockAttached = false;
+  private boundTryGestureResume: (() => void) | null = null;
+
   constructor(config: PlayerConfig) {
     this.config = config;
   }
@@ -188,12 +195,41 @@ export class PCMAudioPlayer {
 
     this.context.onstatechange = () => {
       Log.v(TAG, `AudioContext state changed to: ${this.context?.state}`);
-      if (this.context?.state === "running" && this.canScheduleAudio()) {
-        this.resyncFromBuffer(this.videoElement?.currentTime ?? 0);
+      if (this.context?.state === "running") {
+        this.detachGestureUnlock();
+        if (this.canScheduleAudio()) {
+          this.resyncFromBuffer(this.videoElement?.currentTime ?? 0);
+        }
       }
     };
 
+    this.attachGestureUnlock();
+
     Log.v(TAG, `AudioContext initialized, sampleRate: ${this.context.sampleRate}, state: ${this.context.state}`);
+  }
+
+  /** Retry resume() on the next few real user gestures, in case the initial
+   * (non-gesture-backed) resume attempts never settle. Stops once running. */
+  private attachGestureUnlock(): void {
+    if (this.gestureUnlockAttached) return;
+    this.gestureUnlockAttached = true;
+
+    this.boundTryGestureResume = () => {
+      if (this.context && this.context.state === "suspended") {
+        this.context.resume().catch(() => {});
+      }
+    };
+
+    document.addEventListener("click", this.boundTryGestureResume);
+    document.addEventListener("keydown", this.boundTryGestureResume);
+  }
+
+  private detachGestureUnlock(): void {
+    if (!this.gestureUnlockAttached || !this.boundTryGestureResume) return;
+    document.removeEventListener("click", this.boundTryGestureResume);
+    document.removeEventListener("keydown", this.boundTryGestureResume);
+    this.gestureUnlockAttached = false;
+    this.boundTryGestureResume = null;
   }
 
   attachVideo(video: HTMLVideoElement): void {
@@ -954,6 +990,7 @@ export class PCMAudioPlayer {
   async destroy(): Promise<void> {
     this.stop();
     this.detachVideo();
+    this.detachGestureUnlock();
 
     if (this.stretcher) {
       this.stretcher.destroy();
