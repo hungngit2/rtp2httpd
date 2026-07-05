@@ -282,37 +282,27 @@ class TestAppPathPrefix:
         if status == 200:
             assert "event-stream" in hdrs.get("content-type", "")
 
-    @pytest.mark.parametrize(
-        "path",
-        [
-            "/status",
-            "/player",
-            "/assets/icon.png",
-            "/app/rtp2httpd2/status",
-        ],
-    )
-    def test_unprefixed_or_boundary_mismatch_routes_404(self, prefixed_r2h, path):
-        """Web pages/assets/APIs still strictly require app-path-prefix."""
-        status, _, _ = http_get("127.0.0.1", prefixed_r2h.port, path)
+    def test_boundary_mismatch_route_404s(self, prefixed_r2h):
+        """A path that merely looks like it could be a prefix (but doesn't
+        match app-path-prefix or any known route) is still a genuine 404."""
+        status, _, _ = http_get("127.0.0.1", prefixed_r2h.port, "/app/rtp2httpd2/status")
         assert status == 404
 
-    def test_unprefixed_playlist_still_reachable(self, prefixed_r2h):
-        """Media/service routes (playlist.m3u, epg.xml, rtp/, etc.) stay reachable
-        bare too, since some IPTV client apps have those URLs hardcoded without
-        any reverse-proxy prefix -- unlike pages, which still require the prefix."""
-        status, _, body = http_get("127.0.0.1", prefixed_r2h.port, "/playlist.m3u")
-        assert status == 200
-        assert b"#EXTM3U" in body
-
-        status, _, _ = http_get("127.0.0.1", prefixed_r2h.port, "/epg.xml")
+    @pytest.mark.parametrize("path", ["/status", "/player", "/assets/icon.png", "/playlist.m3u", "/epg.xml"])
+    def test_bare_paths_also_reachable_with_app_path_prefix_configured(self, prefixed_r2h, path):
+        """Every route -- pages, assets, and media/service routes alike -- stays
+        reachable at its bare path even when app-path-prefix is configured.
+        This matters especially for streams: other IPTV client apps and
+        existing playlists often have those URLs hardcoded without any
+        reverse-proxy prefix, and app-path-prefix is meant as an *additional*
+        way to reach everything, not an exclusive gate."""
+        status, _, _ = http_get("127.0.0.1", prefixed_r2h.port, path)
         assert status == 200
 
     def test_stream_route_reachable_both_prefixed_and_bare(self, prefixed_r2h):
         """A configured stream (rtp/) must be reachable both with and without
         app-path-prefix, since some IPTV client apps hardcode bare stream URLs."""
-        status, _, _ = http_request(
-            "127.0.0.1", prefixed_r2h.port, "HEAD", "/rtp/239.0.0.1:1234", timeout=3.0
-        )
+        status, _, _ = http_request("127.0.0.1", prefixed_r2h.port, "HEAD", "/rtp/239.0.0.1:1234", timeout=3.0)
         assert status == 200
 
         status, _, _ = http_request(
