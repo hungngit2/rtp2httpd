@@ -442,6 +442,60 @@ web-auth-password = secret
         finally:
             r2h.stop()
 
+    def test_r2h_token_and_basic_auth_both_required(self, r2h_binary):
+        """When r2h-token and Basic Auth are both configured, a non-local
+        request must satisfy both -- neither alone is sufficient."""
+        port = find_free_port()
+        config = f"""\
+[global]
+verbosity = 4
+xff = 1
+r2h-token = sometoken
+web-auth-user = admin
+web-auth-password = secret
+
+[bind]
+* {port}
+"""
+        r2h = R2HProcess(r2h_binary, port, config_content=config)
+        try:
+            r2h.start()
+
+            # Neither r2h-token nor Basic Auth provided.
+            status, _, _ = http_get(
+                "127.0.0.1", port, "/status", headers={"X-Forwarded-For": "8.8.8.8"}
+            )
+            assert status == 401
+
+            # Only Basic Auth provided -- r2h-token check runs first and rejects.
+            status, _, _ = http_get(
+                "127.0.0.1",
+                port,
+                "/status",
+                headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "secret")},
+            )
+            assert status == 401
+
+            # Only r2h-token provided -- Basic Auth check still applies.
+            status, _, _ = http_get(
+                "127.0.0.1",
+                port,
+                "/status?r2h-token=sometoken",
+                headers={"X-Forwarded-For": "8.8.8.8"},
+            )
+            assert status == 401
+
+            # Both provided correctly.
+            status, _, _ = http_get(
+                "127.0.0.1",
+                port,
+                "/status?r2h-token=sometoken",
+                headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "secret")},
+            )
+            assert status == 200
+        finally:
+            r2h.stop()
+
     def test_require_local_forces_auth_for_loopback(self, r2h_binary):
         port = find_free_port()
         config = f"""\
