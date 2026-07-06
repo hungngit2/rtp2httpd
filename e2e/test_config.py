@@ -5,6 +5,7 @@ Tests cover command-line flags, config file sections, default values,
 and precedence rules.
 """
 
+import base64
 import json
 import time  # needed for TestMaxClients deadline loop
 
@@ -963,16 +964,23 @@ verbosity = 4
             port,
             "POST",
             "/setting/api/save-config",
-            body=b"web-auth-user=admin&web-auth-password=secret&web-auth-require-local=0",
+            body=b"web-auth-user=admin&web-auth-password=secret&web-auth-require-local=1",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         assert status == 200
 
-        status, _, body = http_get("127.0.0.1", port, "/setting/api/get-config")
+        # With web-auth-require-local=1, Basic Auth is required even for loopback clients
+        auth_token = base64.b64encode(b"admin:secret").decode()
+        status, _, body = http_get(
+            "127.0.0.1",
+            port,
+            "/setting/api/get-config",
+            headers={"Authorization": f"Basic {auth_token}"},
+        )
         assert status == 200
         data = json.loads(body)
         assert data["web-auth-user"] == "admin"
         assert data["web-auth-password"] == "secret"
-        assert data["web-auth-require-local"] is False
+        assert data["web-auth-require-local"] is True
     finally:
         r2h.stop()
