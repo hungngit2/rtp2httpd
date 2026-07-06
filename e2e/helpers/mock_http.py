@@ -137,7 +137,7 @@ class MockHTTPUpstreamSilent:
                 conn, addr = self._server_sock.accept()
                 t = threading.Thread(target=self._handle, args=(conn,), daemon=True)
                 t.start()
-            except socket.timeout, OSError:
+            except (socket.timeout, OSError):
                 continue
 
     def _handle(self, conn: socket.socket) -> None:

@@ -191,7 +191,7 @@ def stream_get(
     """
     try:
         sock = socket.create_connection((host, port), timeout=timeout)
-    except OSError, socket.timeout:
+    except (OSError, socket.timeout):
         return 0, {}, b""
     try:
         host_hdr = "[%s]" % host if ":" in host and not host.startswith("[") else host
@@ -220,7 +220,7 @@ def stream_get(
             data += chunk
 
         return _parse_raw_http_response(data, lower_header_names=True)
-    except socket.timeout, OSError:
+    except (socket.timeout, OSError):
         return 0, {}, b""
     finally:
         sock.close()
