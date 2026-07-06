@@ -595,3 +595,55 @@ char *build_proxy_base_url(const char *host_header, const char *x_forwarded_host
 
   return base_url;
 }
+
+static int base64_char_value(char c) {
+  if (c >= 'A' && c <= 'Z')
+    return c - 'A';
+  if (c >= 'a' && c <= 'z')
+    return c - 'a' + 26;
+  if (c >= '0' && c <= '9')
+    return c - '0' + 52;
+  if (c == '+')
+    return 62;
+  if (c == '/')
+    return 63;
+  return -1;
+}
+
+int base64_decode(const char *input, char *output, size_t output_size) {
+  if (!input || !output)
+    return -1;
+
+  size_t len = strlen(input);
+  if (len == 0 || len % 4 != 0)
+    return -1;
+
+  size_t pad = 0;
+  if (input[len - 1] == '=')
+    pad++;
+  if (len >= 2 && input[len - 2] == '=')
+    pad++;
+
+  size_t decoded_len = (len / 4) * 3 - pad;
+  if (decoded_len >= output_size)
+    return -1;
+
+  size_t out_i = 0;
+  for (size_t i = 0; i < len; i += 4) {
+    int v0 = base64_char_value(input[i]);
+    int v1 = base64_char_value(input[i + 1]);
+    int v2 = (input[i + 2] == '=') ? 0 : base64_char_value(input[i + 2]);
+    int v3 = (input[i + 3] == '=') ? 0 : base64_char_value(input[i + 3]);
+    if (v0 < 0 || v1 < 0 || v2 < 0 || v3 < 0)
+      return -1;
+
+    uint32_t triple = ((uint32_t)v0 << 18) | ((uint32_t)v1 << 12) | ((uint32_t)v2 << 6) | (uint32_t)v3;
+    output[out_i++] = (char)((triple >> 16) & 0xFF);
+    if (input[i + 2] != '=')
+      output[out_i++] = (char)((triple >> 8) & 0xFF);
+    if (input[i + 3] != '=')
+      output[out_i++] = (char)(triple & 0xFF);
+  }
+  output[out_i] = '\0';
+  return (int)out_i;
+}
