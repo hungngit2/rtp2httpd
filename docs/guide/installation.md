@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/inst
 安装完成后，可以通过浏览器访问 `http://<设备IP>:5140/setting` 打开设置页面，无需 SSH 登录即可修改配置（保存后自动生效）。
 
 > [!WARNING]
-> 设置页面默认没有身份验证。如果设备暴露在不可信网络（例如公网或不受信任的局域网）中，请务必先配置 [`r2h-token`](../reference/configuration.md) 再对外开放端口，否则任何能访问该端口的人都可以修改配置（包括视频快照功能使用的 `ffmpeg-args` 参数，存在被利用执行任意命令的风险）。
+> 设置页面默认没有身份验证。如果设备暴露在不可信网络（例如公网或不受信任的局域网）中，请务必先配置 [`r2h-token`](../reference/configuration.md) 再对外开放端口，否则任何能访问该端口的人都可以修改配置（包括视频快照功能使用的 `ffmpeg-args` 参数，存在被利用执行任意命令的风险）。或者配置 `web-auth-user` 和 `web-auth-password` 启用浏览器原生的 HTTP 基本认证；本地及局域网客户端默认可绕过此认证，若需对所有设备强制要求认证，可在同一设置页面启用 `web-auth-require-local` 选项。
 
 ## 静态二进制文件部署
 
