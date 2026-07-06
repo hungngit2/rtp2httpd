@@ -50,6 +50,7 @@ typedef struct {
   char x_forwarded_proto[16];
   int x_request_snapshot;
   char cookie[HTTP_COOKIE_BUFFER_SIZE];     /* Cookie header value for r2h-token extraction */
+  char authorization[512];                  /* Authorization header value, e.g. "Basic <base64>" */
   char access_control_request_method[64];   /* CORS preflight method */
   char access_control_request_headers[512]; /* CORS preflight headers */
   http_parse_state_t parse_state;

@@ -379,6 +379,9 @@ int http_parse_request(char *inbuf, int *in_len, http_request_t *req) {
         } else if (strcasecmp(inbuf, "Cookie") == 0) {
           strncpy(req->cookie, value, sizeof(req->cookie) - 1);
           req->cookie[sizeof(req->cookie) - 1] = '\0';
+        } else if (strcasecmp(inbuf, "Authorization") == 0) {
+          strncpy(req->authorization, value, sizeof(req->authorization) - 1);
+          req->authorization[sizeof(req->authorization) - 1] = '\0';
         } else if (strcasecmp(inbuf, "Access-Control-Request-Method") == 0) {
           strncpy(req->access_control_request_method, value, sizeof(req->access_control_request_method) - 1);
           req->access_control_request_method[sizeof(req->access_control_request_method) - 1] = '\0';
