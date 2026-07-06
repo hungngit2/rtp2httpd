@@ -27,6 +27,8 @@ After installation, open `http://<device-ip>:5140/setting` in a browser to acces
 
 > [!WARNING]
 > The settings page has no authentication by default. If your device is reachable from an untrusted network (e.g. the public internet or an untrusted LAN), configure [`r2h-token`](../reference/configuration.md) before exposing the port — otherwise anyone who can reach it can change your configuration, including the `ffmpeg-args` value used by the video snapshot feature, which could be abused to execute arbitrary commands. Alternatively, configure `web-auth-user` and `web-auth-password` to enable browser-native HTTP Basic Auth; local and LAN clients bypass this by default, and the `web-auth-require-local` option (same settings page) can require it for every client if needed.
+>
+> If rtp2httpd runs behind a reverse proxy, you must also enable `xff = 1` so it can correctly identify the real client IP; otherwise the local-network exemption logic (and `web-auth-require-local`) treats every proxied client as local, regardless of its actual origin.
 
 ## Static Binary Deployment
 
