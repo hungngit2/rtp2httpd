@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=rtp2httpd
 
-RELEASE_VERSION:=1.0.0
+RELEASE_VERSION:=1.0.1
 
 PKG_VERSION:=$(shell echo "$(RELEASE_VERSION)" | sed 's/-\([a-z]*\)\.\([0-9]*\)/_\1\2/g')
 PKG_RELEASE:=1
@@ -16,7 +16,7 @@ export RELEASE_VERSION
 
 PKG_SOURCE:=rtp2httpd-v$(RELEASE_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/hungngit2/rtp2httpd/tar.gz/v$(RELEASE_VERSION)?
-PKG_HASH:=1da91550a6efe9c8dd341e003bad7f0bc90c22f5eba04d03542f352dec8cf163
+PKG_HASH:=ef8daba8dc5df1abe03886b35f22f36af1954a3c4ee95e194b772bf90b5f6c61
 
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/cmake.mk
