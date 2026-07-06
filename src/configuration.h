@@ -51,6 +51,11 @@ typedef struct {
   char *hostname;  /* Server hostname for URL generation (NULL=auto) */
   int xff;         /* Enable X-Forwarded-For header recognize (0=no, 1=yes) */
   char *r2h_token; /* Authentication token for HTTP requests (NULL=disabled) */
+  char *web_auth_user;     /* HTTP Basic Auth username for /status,/player,/setting
+                               from non-local clients (NULL=disabled) */
+  char *web_auth_password; /* HTTP Basic Auth password (NULL=disabled) */
+  int web_auth_require_local; /* Also require Basic Auth for local/LAN clients
+                                  (0=local bypasses auth [default], 1=always required) */
 
   /* Worker and performance settings */
   int workers;              /* Number of worker threads (SO_REUSEPORT sharded), default 1 */
