@@ -134,6 +134,9 @@ export const SETTING_FIELDS: SettingField[] = [
   { key: "use-relative-path-in-m3u", tab: "advanced", type: "checkbox", labelKey: "useRelativePathInM3u" },
   { key: "hostname", tab: "advanced", type: "text", labelKey: "hostname" },
   { key: "r2h-token", tab: "advanced", type: "text", labelKey: "r2hToken" },
+  { key: "web-auth-user", tab: "advanced", type: "text", labelKey: "webAuthUser" },
+  { key: "web-auth-password", tab: "advanced", type: "text", labelKey: "webAuthPassword" },
+  { key: "web-auth-require-local", tab: "advanced", type: "checkbox", labelKey: "webAuthRequireLocal" },
   { key: "cors-allow-origin", tab: "advanced", type: "text", labelKey: "corsAllowOrigin", placeholder: "*" },
   { key: "xff", tab: "advanced", type: "checkbox", labelKey: "xff" },
   {
