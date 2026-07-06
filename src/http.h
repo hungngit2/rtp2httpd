@@ -223,6 +223,12 @@ void http_send_503(connection_t *conn);
 void http_send_401(connection_t *conn);
 
 /**
+ * Send HTTP 401 Unauthorized response with a Basic auth challenge
+ * @param conn Connection object
+ */
+void http_send_401_basic(connection_t *conn);
+
+/**
  * Parse URL and extract components (protocol, host, port, path)
  * Supports various formats:
  *   - 10.0.0.1

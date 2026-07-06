@@ -788,6 +788,13 @@ void http_send_401(connection_t *conn) {
   connection_queue_output_and_flush(conn, (const uint8_t *)body, sizeof(body) - 1);
 }
 
+void http_send_401_basic(connection_t *conn) {
+  static const char body[] = "<!doctype html><title>401</title>Unauthorized";
+
+  send_http_headers(conn, STATUS_401, "text/html; charset=utf-8", "WWW-Authenticate: Basic realm=\"rtp2httpd\"\r\n");
+  connection_queue_output_and_flush(conn, (const uint8_t *)body, sizeof(body) - 1);
+}
+
 int http_parse_url_components(const char *url, char *protocol, char *host, char *port, char *path) {
   const char *p = url;
   size_t len;
