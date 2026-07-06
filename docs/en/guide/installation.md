@@ -26,7 +26,7 @@ The script installs the binary to `/usr/local/bin/rtp2httpd`, writes the default
 After installation, open `http://<device-ip>:5140/setting` in a browser to access the settings page and change configuration without SSH access (changes take effect automatically after saving).
 
 > [!WARNING]
-> The settings page has no authentication by default. If your device is reachable from an untrusted network (e.g. the public internet or an untrusted LAN), configure [`r2h-token`](../reference/configuration.md) before exposing the port — otherwise anyone who can reach it can change your configuration, including the `ffmpeg-args` value used by the video snapshot feature, which could be abused to execute arbitrary commands.
+> The settings page has no authentication by default. If your device is reachable from an untrusted network (e.g. the public internet or an untrusted LAN), configure [`r2h-token`](../reference/configuration.md) before exposing the port — otherwise anyone who can reach it can change your configuration, including the `ffmpeg-args` value used by the video snapshot feature, which could be abused to execute arbitrary commands. Alternatively, configure `web-auth-user` and `web-auth-password` to enable browser-native HTTP Basic Auth; local and LAN clients bypass this by default, and the `web-auth-require-local` option (same settings page) can require it for every client if needed.
 
 ## Static Binary Deployment
 
