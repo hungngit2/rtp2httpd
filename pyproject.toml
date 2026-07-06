@@ -17,6 +17,11 @@ dev = [
 
 [tool.ruff]
 line-length = 120
+# Pin below the project's actual requires-python (3.14): ruff 0.15.x's
+# formatter mis-renders `except (A, B):` as invalid `except A, B:` under an
+# inferred/explicit py314 target. py313 has no syntax differences that matter
+# here and avoids the bug.
+target-version = "py313"
 
 [tool.basedpyright]
 pythonVersion = "3.14"
