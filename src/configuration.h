@@ -46,14 +46,14 @@ typedef struct {
   char *log_format;     /* Access log format string */
 
   /* Network and service settings */
-  int udpxy;       /* Enable UDPxy URL format support (0=no, 1=yes) */
-  int maxclients;  /* Maximum concurrent client connections */
-  char *hostname;  /* Server hostname for URL generation (NULL=auto) */
-  int xff;         /* Enable X-Forwarded-For header recognize (0=no, 1=yes) */
-  char *r2h_token; /* Authentication token for HTTP requests (NULL=disabled) */
-  char *web_auth_user;     /* HTTP Basic Auth username for /status,/player,/setting
-                               from non-local clients (NULL=disabled) */
-  char *web_auth_password; /* HTTP Basic Auth password (NULL=disabled) */
+  int udpxy;                  /* Enable UDPxy URL format support (0=no, 1=yes) */
+  int maxclients;             /* Maximum concurrent client connections */
+  char *hostname;             /* Server hostname for URL generation (NULL=auto) */
+  int xff;                    /* Enable X-Forwarded-For header recognize (0=no, 1=yes) */
+  char *r2h_token;            /* Authentication token for HTTP requests (NULL=disabled) */
+  char *web_auth_user;        /* HTTP Basic Auth username for /status,/player,/setting
+                                  from non-local clients (NULL=disabled) */
+  char *web_auth_password;    /* HTTP Basic Auth password (NULL=disabled) */
   int web_auth_require_local; /* Also require Basic Auth for local/LAN clients
                                   (0=local bypasses auth [default], 1=always required) */
 
