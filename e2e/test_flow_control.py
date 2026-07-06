@@ -98,7 +98,7 @@ def _slow_drain_until_eof(
         # so the test fails on the assertion, not on a parse exception.
         try:
             status_code = int(parts[0].split()[1])
-        except (IndexError, ValueError):
+        except IndexError, ValueError:
             return 0, {}, buf
         hdrs = {}
         for line in parts[1:]:

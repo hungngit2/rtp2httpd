@@ -45,7 +45,7 @@ def _get_status_clients(port: int, timeout: float = 3.0) -> list[dict]:
     extract the active clients list."""
     try:
         sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
-    except (OSError, socket.timeout):
+    except OSError, socket.timeout:
         return []
     data = b""
     try:
@@ -63,7 +63,7 @@ def _get_status_clients(port: int, timeout: float = 3.0) -> list[dict]:
             data += chunk
             if b"\ndata: {" in data and b'"clients"' in data:
                 break
-    except (socket.timeout, OSError):
+    except socket.timeout, OSError:
         pass
     finally:
         sock.close()

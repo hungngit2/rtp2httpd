@@ -100,7 +100,7 @@ class _RTSPServerBase:
                 conn, addr = self._server_sock.accept()
                 t = threading.Thread(target=self._handle, args=(conn, addr), daemon=True)
                 t.start()
-            except (socket.timeout, OSError):
+            except socket.timeout, OSError:
                 continue
 
     def _handle(self, conn: socket.socket, addr: tuple) -> None:
@@ -204,7 +204,7 @@ class _RTSPServerBase:
                         ("RTSP/1.0 200 OK\r\nCSeq: %s\r\nSession: %s\r\n\r\n" % (cseq, self._session_id())).encode()
                     )
                     return
-        except (socket.timeout, ConnectionError, OSError):
+        except socket.timeout, ConnectionError, OSError:
             pass
         finally:
             conn.close()
@@ -265,7 +265,7 @@ class MockRTSPServer(_RTSPServerBase):
                 seq = (seq + 1) & 0xFFFF
                 ts = (ts + 3600) & 0xFFFFFFFF
                 time.sleep(0.001)
-        except (OSError, BrokenPipeError):
+        except OSError, BrokenPipeError:
             pass
 
 
@@ -327,7 +327,7 @@ class MockRTSPServerUDP(_RTSPServerBase):
                 seq = (seq + 1) & 0xFFFF
                 ts = (ts + 3600) & 0xFFFFFFFF
                 time.sleep(0.001)
-        except (OSError, BrokenPipeError):
+        except OSError, BrokenPipeError:
             pass
         finally:
             udp_sock.close()
@@ -384,7 +384,7 @@ class MockRTSPServerNoMedia(_RTSPServerBase):
                         break
                 except socket.timeout:
                     continue
-        except (ConnectionError, OSError):
+        except ConnectionError, OSError:
             pass
         finally:
             conn.close()
@@ -418,7 +418,7 @@ class MockRTSPServerNoTeardownResponse(_RTSPServerBase):
                 seq = (seq + 1) & 0xFFFF
                 ts = (ts + 3600) & 0xFFFFFFFF
                 time.sleep(0.001)
-        except (OSError, BrokenPipeError):
+        except OSError, BrokenPipeError:
             return
 
         # Now wait for TEARDOWN but don't respond to it
@@ -432,7 +432,7 @@ class MockRTSPServerNoTeardownResponse(_RTSPServerBase):
                     # Got TEARDOWN (or anything) — just ignore and hold connection
                 except socket.timeout:
                     continue
-        except (ConnectionError, OSError):
+        except ConnectionError, OSError:
             pass
         finally:
             conn.close()
