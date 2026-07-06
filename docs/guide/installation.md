@@ -28,6 +28,8 @@ curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/inst
 
 > [!WARNING]
 > 设置页面默认没有身份验证。如果设备暴露在不可信网络（例如公网或不受信任的局域网）中，请务必先配置 [`r2h-token`](../reference/configuration.md) 再对外开放端口，否则任何能访问该端口的人都可以修改配置（包括视频快照功能使用的 `ffmpeg-args` 参数，存在被利用执行任意命令的风险）。或者配置 `web-auth-user` 和 `web-auth-password` 启用浏览器原生的 HTTP 基本认证；本地及局域网客户端默认可绕过此认证，若需对所有设备强制要求认证，可在同一设置页面启用 `web-auth-require-local` 选项。
+>
+> 若 rtp2httpd 部署在反向代理之后，必须同时启用 `xff = 1` 才能正确识别客户端真实 IP；否则本地网络豁免逻辑（及 `web-auth-require-local`）会将所有经代理转发的客户端一律视为本地，无论其真实来源如何。
 
 ## 静态二进制文件部署
 
