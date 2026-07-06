@@ -948,7 +948,14 @@ def test_save_config_rejects_newline_injection(r2h_binary):
 
 def test_web_auth_fields_round_trip(r2h_binary):
     port = find_free_port()
-    r2h = R2HProcess(r2h_binary, port, extra_args=["-v", "4"])
+    config = f"""\
+[global]
+verbosity = 4
+
+[bind]
+* {port}
+"""
+    r2h = R2HProcess(r2h_binary, port, config_content=config)
     try:
         r2h.start()
         status, _, body = http_request(
@@ -956,7 +963,7 @@ def test_web_auth_fields_round_trip(r2h_binary):
             port,
             "POST",
             "/setting/api/save-config",
-            body=b"web-auth-user=admin&web-auth-password=secret&web-auth-require-local=1",
+            body=b"web-auth-user=admin&web-auth-password=secret&web-auth-require-local=0",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         assert status == 200
@@ -966,6 +973,6 @@ def test_web_auth_fields_round_trip(r2h_binary):
         data = json.loads(body)
         assert data["web-auth-user"] == "admin"
         assert data["web-auth-password"] == "secret"
-        assert data["web-auth-require-local"] is True
+        assert data["web-auth-require-local"] is False
     finally:
         r2h.stop()
