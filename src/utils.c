@@ -630,6 +630,18 @@ int base64_decode(const char *input, char *output, size_t output_size) {
 
   size_t out_i = 0;
   for (size_t i = 0; i < len; i += 4) {
+    int is_last_block = (i + 4 == len);
+
+    /* Reject padding in non-final blocks */
+    if (!is_last_block) {
+      if (input[i + 2] == '=' || input[i + 3] == '=')
+        return -1;
+    }
+
+    /* Reject misplaced padding in final block: if '=' at pos 2, pos 3 must also be '=' */
+    if (is_last_block && input[i + 2] == '=' && input[i + 3] != '=')
+      return -1;
+
     int v0 = base64_char_value(input[i]);
     int v1 = base64_char_value(input[i + 1]);
     int v2 = (input[i + 2] == '=') ? 0 : base64_char_value(input[i + 2]);
