@@ -32,6 +32,9 @@ int cmd_bind_set = 0;
 int cmd_hostname_set = 0;
 int cmd_xff_set = 0;
 int cmd_r2h_token_set = 0;
+int cmd_web_auth_user_set = 0;
+int cmd_web_auth_password_set = 0;
+int cmd_web_auth_require_local_set = 0;
 int cmd_buffer_pool_max_size_set = 0;
 int cmd_udp_rcvbuf_size_set = 0;
 int cmd_mcast_rejoin_interval_set = 0;
@@ -67,7 +70,10 @@ enum long_option_e {
   OPT_USE_RELATIVE_PATH_IN_M3U,
   OPT_ACCESS_LOG,
   OPT_LOG_FORMAT,
-  OPT_SETTING_PAGE_PATH
+  OPT_SETTING_PAGE_PATH,
+  OPT_WEB_AUTH_USER,
+  OPT_WEB_AUTH_PASSWORD,
+  OPT_WEB_AUTH_REQUIRE_LOCAL
 };
 
 /* M3U parsing state variables */
@@ -120,6 +126,10 @@ static void free_config_strings(config_t *target, bool force_free) {
     safe_free_string(&target->hostname);
   if (!cmd_r2h_token_set || force_free)
     safe_free_string(&target->r2h_token);
+  if (!cmd_web_auth_user_set || force_free)
+    safe_free_string(&target->web_auth_user);
+  if (!cmd_web_auth_password_set || force_free)
+    safe_free_string(&target->web_auth_password);
   if (!cmd_ffmpeg_path_set || force_free)
     safe_free_string(&target->ffmpeg_path);
   if (!cmd_ffmpeg_args_set || force_free)
@@ -683,6 +693,28 @@ void parse_global_sec(char *line) {
     return;
   }
 
+  if (strcasecmp("web-auth-user", param) == 0) {
+    if (set_if_not_cmd_override(cmd_web_auth_user_set, "web-auth-user")) {
+      safe_free_string(&config.web_auth_user);
+      config.web_auth_user = strdup(value);
+    }
+    return;
+  }
+
+  if (strcasecmp("web-auth-password", param) == 0) {
+    if (set_if_not_cmd_override(cmd_web_auth_password_set, "web-auth-password")) {
+      safe_free_string(&config.web_auth_password);
+      config.web_auth_password = strdup(value);
+    }
+    return;
+  }
+
+  if (strcasecmp("web-auth-require-local", param) == 0) {
+    if (set_if_not_cmd_override(cmd_web_auth_require_local_set, "web-auth-require-local"))
+      config.web_auth_require_local = parse_bool(value);
+    return;
+  }
+
   if (strcasecmp("ffmpeg-path", param) == 0) {
     if (set_if_not_cmd_override(cmd_ffmpeg_path_set, "ffmpeg-path")) {
       safe_free_string(&config.ffmpeg_path);
@@ -1085,6 +1117,8 @@ int config_snapshot(config_t *snapshot) {
   *snapshot = config;
   snapshot->hostname = NULL;
   snapshot->r2h_token = NULL;
+  snapshot->web_auth_user = NULL;
+  snapshot->web_auth_password = NULL;
   snapshot->ffmpeg_path = NULL;
   snapshot->ffmpeg_args = NULL;
   snapshot->status_page_path = NULL;
@@ -1111,6 +1145,8 @@ int config_snapshot(config_t *snapshot) {
 
   SNAPSHOT_STRING(hostname, cmd_hostname_set);
   SNAPSHOT_STRING(r2h_token, cmd_r2h_token_set);
+  SNAPSHOT_STRING(web_auth_user, cmd_web_auth_user_set);
+  SNAPSHOT_STRING(web_auth_password, cmd_web_auth_password_set);
   SNAPSHOT_STRING(ffmpeg_path, cmd_ffmpeg_path_set);
   SNAPSHOT_STRING(ffmpeg_args, cmd_ffmpeg_args_set);
   SNAPSHOT_STRING(status_page_path, cmd_status_page_path_set);
@@ -1175,6 +1211,8 @@ void config_init(void) {
     config.udp_rcvbuf_size = 512 * 1024; /* 512KB default */
   if (!cmd_xff_set)
     config.xff = 0;
+  if (!cmd_web_auth_require_local_set)
+    config.web_auth_require_local = 0;
   if (!cmd_video_snapshot_set)
     config.video_snapshot = 0;
   if (!cmd_mcast_rejoin_interval_set)
@@ -1344,6 +1382,12 @@ void usage(FILE *f, char *progname) {
           "/player)\n"
           "\t   --setting-page-path <path>  HTTP path for settings UI (default: "
           "/setting)\n"
+          "\t   --web-auth-user <user>  HTTP Basic Auth username for "
+          "/status,/player,/setting from non-local clients (default: disabled)\n"
+          "\t   --web-auth-password <password>  HTTP Basic Auth password "
+          "(default: disabled)\n"
+          "\t   --web-auth-require-local  Also require HTTP Basic Auth for "
+          "local/LAN clients (default: off, local bypasses auth)\n"
           "\t   --app-path-prefix <path>  Public mount path prefix for all HTTP "
           "resources (default: none)\n"
           "\t   --use-relative-path-in-m3u  Use root-relative URLs in generated "
@@ -1436,6 +1480,9 @@ void parse_cmd_line(int argc, char *argv[]) {
                                     {"status-page-path", required_argument, 0, 's'},
                                     {"player-page-path", required_argument, 0, 'p'},
                                     {"setting-page-path", required_argument, 0, OPT_SETTING_PAGE_PATH},
+                                    {"web-auth-user", required_argument, 0, OPT_WEB_AUTH_USER},
+                                    {"web-auth-password", required_argument, 0, OPT_WEB_AUTH_PASSWORD},
+                                    {"web-auth-require-local", no_argument, 0, OPT_WEB_AUTH_REQUIRE_LOCAL},
                                     {"app-path-prefix", required_argument, 0, OPT_APP_PATH_PREFIX},
                                     {"use-relative-path-in-m3u", no_argument, 0, OPT_USE_RELATIVE_PATH_IN_M3U},
                                     {"external-m3u", required_argument, 0, 'M'},
@@ -1566,6 +1613,20 @@ void parse_cmd_line(int argc, char *argv[]) {
     case OPT_SETTING_PAGE_PATH:
       set_setting_page_path_value(optarg);
       cmd_setting_page_path_set = 1;
+      break;
+    case OPT_WEB_AUTH_USER:
+      safe_free_string(&config.web_auth_user);
+      config.web_auth_user = strdup(optarg);
+      cmd_web_auth_user_set = 1;
+      break;
+    case OPT_WEB_AUTH_PASSWORD:
+      safe_free_string(&config.web_auth_password);
+      config.web_auth_password = strdup(optarg);
+      cmd_web_auth_password_set = 1;
+      break;
+    case OPT_WEB_AUTH_REQUIRE_LOCAL:
+      config.web_auth_require_local = 1;
+      cmd_web_auth_require_local_set = 1;
       break;
     case OPT_APP_PATH_PREFIX:
       set_app_path_prefix_value(optarg);

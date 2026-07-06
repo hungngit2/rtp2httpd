@@ -379,6 +379,9 @@ int http_parse_request(char *inbuf, int *in_len, http_request_t *req) {
         } else if (strcasecmp(inbuf, "Cookie") == 0) {
           strncpy(req->cookie, value, sizeof(req->cookie) - 1);
           req->cookie[sizeof(req->cookie) - 1] = '\0';
+        } else if (strcasecmp(inbuf, "Authorization") == 0) {
+          strncpy(req->authorization, value, sizeof(req->authorization) - 1);
+          req->authorization[sizeof(req->authorization) - 1] = '\0';
         } else if (strcasecmp(inbuf, "Access-Control-Request-Method") == 0) {
           strncpy(req->access_control_request_method, value, sizeof(req->access_control_request_method) - 1);
           req->access_control_request_method[sizeof(req->access_control_request_method) - 1] = '\0';
@@ -782,6 +785,13 @@ void http_send_401(connection_t *conn) {
   send_http_headers(conn, STATUS_401, "text/html; charset=utf-8", "WWW-Authenticate: Bearer\r\n");
 
   /* Send body and flush */
+  connection_queue_output_and_flush(conn, (const uint8_t *)body, sizeof(body) - 1);
+}
+
+void http_send_401_basic(connection_t *conn) {
+  static const char body[] = "<!doctype html><title>401</title>Unauthorized";
+
+  send_http_headers(conn, STATUS_401, "text/html; charset=utf-8", "WWW-Authenticate: Basic realm=\"rtp2httpd\"\r\n");
   connection_queue_output_and_flush(conn, (const uint8_t *)body, sizeof(body) - 1);
 }
 

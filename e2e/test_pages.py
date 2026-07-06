@@ -3,6 +3,7 @@ E2E tests for built-in web pages (status, player) and the root
 playlist endpoint.
 """
 
+import base64
 import os
 import time
 
@@ -336,6 +337,176 @@ r2h-token = secret-token
                 f"{APP_PREFIX}/status",
                 headers={"Cookie": "r2h-token=secret-token"},
             )
+            assert status == 200
+        finally:
+            r2h.stop()
+
+
+class TestWebBasicAuth:
+    """web-auth-user/web-auth-password gate /status, /player, /setting (and
+    their APIs/SSE) for non-local clients only."""
+
+    def _config(self, port: int) -> str:
+        return f"""\
+[global]
+verbosity = 4
+xff = 1
+web-auth-user = admin
+web-auth-password = secret
+
+[bind]
+* {port}
+"""
+
+    def _basic_auth_header(self, user: str, password: str) -> dict:
+        token = base64.b64encode(f"{user}:{password}".encode()).decode()
+        return {"Authorization": f"Basic {token}"}
+
+    def test_local_client_bypasses_auth(self, r2h_binary):
+        port = find_free_port()
+        r2h = R2HProcess(r2h_binary, port, config_content=self._config(port))
+        try:
+            r2h.start()
+            status, _, _ = http_get("127.0.0.1", port, "/status")
+            assert status == 200
+        finally:
+            r2h.stop()
+
+    def test_non_local_client_requires_auth(self, r2h_binary):
+        port = find_free_port()
+        r2h = R2HProcess(r2h_binary, port, config_content=self._config(port))
+        try:
+            r2h.start()
+            status, hdrs, _ = http_get("127.0.0.1", port, "/status", headers={"X-Forwarded-For": "8.8.8.8"})
+            assert status == 401
+            assert "Basic" in get_header(hdrs, "WWW-Authenticate")
+
+            status, _, _ = http_get(
+                "127.0.0.1",
+                port,
+                "/status",
+                headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "secret")},
+            )
+            assert status == 200
+
+            status, _, _ = http_get(
+                "127.0.0.1",
+                port,
+                "/status",
+                headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "wrong")},
+            )
+            assert status == 401
+        finally:
+            r2h.stop()
+
+    def test_non_local_client_setting_and_player_require_auth(self, r2h_binary):
+        port = find_free_port()
+        r2h = R2HProcess(r2h_binary, port, config_content=self._config(port))
+        try:
+            r2h.start()
+            for path in ("/player", "/setting", "/setting/api/get-config"):
+                status, _, _ = http_get("127.0.0.1", port, path, headers={"X-Forwarded-For": "8.8.8.8"})
+                assert status == 401, f"{path} should require auth"
+
+                status, _, _ = http_get(
+                    "127.0.0.1",
+                    port,
+                    path,
+                    headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "secret")},
+                )
+                assert status == 200, f"{path} should succeed with correct credentials"
+        finally:
+            r2h.stop()
+
+    def test_non_local_stream_route_unaffected(self, r2h_binary):
+        port = find_free_port()
+        config = self._config(port) + "\n[services]\nrtp://239.0.0.1:1234\n"
+        r2h = R2HProcess(r2h_binary, port, config_content=config)
+        try:
+            r2h.start()
+            status, _, _ = http_request(
+                "127.0.0.1",
+                port,
+                "HEAD",
+                "/rtp/239.0.0.1:1234",
+                headers={"X-Forwarded-For": "8.8.8.8"},
+                timeout=3.0,
+            )
+            assert status == 200
+        finally:
+            r2h.stop()
+
+    def test_r2h_token_and_basic_auth_both_required(self, r2h_binary):
+        """When r2h-token and Basic Auth are both configured, a non-local
+        request must satisfy both -- neither alone is sufficient."""
+        port = find_free_port()
+        config = f"""\
+[global]
+verbosity = 4
+xff = 1
+r2h-token = sometoken
+web-auth-user = admin
+web-auth-password = secret
+
+[bind]
+* {port}
+"""
+        r2h = R2HProcess(r2h_binary, port, config_content=config)
+        try:
+            r2h.start()
+
+            # Neither r2h-token nor Basic Auth provided.
+            status, _, _ = http_get("127.0.0.1", port, "/status", headers={"X-Forwarded-For": "8.8.8.8"})
+            assert status == 401
+
+            # Only Basic Auth provided -- r2h-token check runs first and rejects.
+            status, _, _ = http_get(
+                "127.0.0.1",
+                port,
+                "/status",
+                headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "secret")},
+            )
+            assert status == 401
+
+            # Only r2h-token provided -- Basic Auth check still applies.
+            status, _, _ = http_get(
+                "127.0.0.1",
+                port,
+                "/status?r2h-token=sometoken",
+                headers={"X-Forwarded-For": "8.8.8.8"},
+            )
+            assert status == 401
+
+            # Both provided correctly.
+            status, _, _ = http_get(
+                "127.0.0.1",
+                port,
+                "/status?r2h-token=sometoken",
+                headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "secret")},
+            )
+            assert status == 200
+        finally:
+            r2h.stop()
+
+    def test_require_local_forces_auth_for_loopback(self, r2h_binary):
+        port = find_free_port()
+        config = f"""\
+[global]
+verbosity = 4
+web-auth-user = admin
+web-auth-password = secret
+web-auth-require-local = 1
+
+[bind]
+* {port}
+"""
+        r2h = R2HProcess(r2h_binary, port, config_content=config)
+        try:
+            r2h.start()
+            status, _, _ = http_get("127.0.0.1", port, "/status")
+            assert status == 401
+
+            status, _, _ = http_get("127.0.0.1", port, "/status", headers=self._basic_auth_header("admin", "secret"))
             assert status == 200
         finally:
             r2h.stop()

@@ -168,6 +168,15 @@ int format_host_for_url(const char *host, char *out, size_t out_size);
 int format_host_port_for_url(const char *host, int port, int default_port, char *out, size_t out_size);
 
 /**
+ * Decode a standard base64 string (RFC 4648 alphabet, `=` padding required).
+ * @param input NUL-terminated base64 string; length must be a multiple of 4
+ * @param output Output buffer (NUL-terminated on success)
+ * @param output_size Size of output buffer
+ * @return Decoded byte count on success, -1 on malformed input or if output_size is too small
+ */
+int base64_decode(const char *input, char *output, size_t output_size);
+
+/**
  * Calculate the escaped length of a string when encoded as JSON string content.
  * The returned size does not include the terminating NUL byte.
  *

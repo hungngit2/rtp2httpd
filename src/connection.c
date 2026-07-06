@@ -11,9 +11,11 @@
 #include "status.h"
 #include "utils.h"
 #include "zerocopy.h"
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -91,6 +93,92 @@ typedef enum {
   TOKEN_SOURCE_COOKIE, /* From Cookie header */
   TOKEN_SOURCE_UA      /* From User-Agent R2HTOKEN/xxx */
 } token_source_t;
+
+static int ipv4_addr_in_cidr(uint32_t addr_host_order, uint32_t base, int prefix_len) {
+  uint32_t mask = (prefix_len == 0) ? 0 : (~0U << (32 - prefix_len));
+  return (addr_host_order & mask) == (base & mask);
+}
+
+/* RFC1918 + loopback + link-local -- private ranges we treat as "local". */
+static int ipv4_is_local(uint32_t addr_host_order) {
+  return ipv4_addr_in_cidr(addr_host_order, 0x7F000000, 8) ||  /* 127.0.0.0/8 */
+         ipv4_addr_in_cidr(addr_host_order, 0x0A000000, 8) ||  /* 10.0.0.0/8 */
+         ipv4_addr_in_cidr(addr_host_order, 0xAC100000, 12) || /* 172.16.0.0/12 */
+         ipv4_addr_in_cidr(addr_host_order, 0xC0A80000, 16) || /* 192.168.0.0/16 */
+         ipv4_addr_in_cidr(addr_host_order, 0xA9FE0000, 16);   /* 169.254.0.0/16 */
+}
+
+static int ipv6_is_local(const struct in6_addr *addr) {
+  if (IN6_IS_ADDR_LOOPBACK(addr) || IN6_IS_ADDR_LINKLOCAL(addr))
+    return 1;
+  if ((addr->s6_addr[0] & 0xFE) == 0xFC) /* fc00::/7 unique-local */
+    return 1;
+  if (IN6_IS_ADDR_V4MAPPED(addr)) {
+    uint32_t v4_net;
+    memcpy(&v4_net, &addr->s6_addr[12], sizeof(v4_net));
+    return ipv4_is_local(ntohl(v4_net));
+  }
+  return 0;
+}
+
+/* Parses an IP literal (no port) and classifies it as local/private.
+ * Any parse failure is treated as NOT local (fail closed). */
+static int address_string_is_local(const char *ip_str) {
+  struct in_addr v4;
+  struct in6_addr v6;
+
+  if (inet_pton(AF_INET, ip_str, &v4) == 1)
+    return ipv4_is_local(ntohl(v4.s_addr));
+  if (inet_pton(AF_INET6, ip_str, &v6) == 1)
+    return ipv6_is_local(&v6);
+  return 0;
+}
+
+/* Determines whether the request's effective client address is local/private.
+ * When xff is enabled and X-Forwarded-For is present, trusts that address
+ * (same trust boundary already applied to XFF elsewhere in this file);
+ * otherwise uses the raw socket peer address. Unix-domain-socket clients are
+ * always local. */
+static int is_client_local(connection_t *c) {
+  if (!c)
+    return 1;
+  if (c->client_addr_len > 0 && c->client_addr.ss_family == AF_UNIX)
+    return 1;
+
+  if (config.xff && c->http_req.x_forwarded_for[0] != '\0') {
+    return address_string_is_local(c->http_req.x_forwarded_for);
+  }
+
+  if (c->client_addr.ss_family == AF_INET) {
+    const struct sockaddr_in *sin = (const struct sockaddr_in *)&c->client_addr;
+    return ipv4_is_local(ntohl(sin->sin_addr.s_addr));
+  }
+  if (c->client_addr.ss_family == AF_INET6) {
+    const struct sockaddr_in6 *sin6 = (const struct sockaddr_in6 *)&c->client_addr;
+    return ipv6_is_local(&sin6->sin6_addr);
+  }
+  return 0; /* unknown family: fail closed (not local) */
+}
+
+/* Validates the Authorization header against config.web_auth_user/password. */
+static int is_web_auth_valid(connection_t *c) {
+  static const char prefix[] = "Basic ";
+  const char *auth = c->http_req.authorization;
+
+  if (strncmp(auth, prefix, sizeof(prefix) - 1) != 0)
+    return 0;
+
+  char decoded[256];
+  if (base64_decode(auth + sizeof(prefix) - 1, decoded, sizeof(decoded)) < 0)
+    return 0;
+
+  char *colon = strchr(decoded, ':');
+  if (!colon)
+    return 0;
+  *colon = '\0';
+
+  return strcmp(decoded, config.web_auth_user) == 0 && strcmp(colon + 1, config.web_auth_password) == 0;
+}
 
 static int connection_client_is_tcp(const connection_t *c) {
   if (!c || c->client_addr_len == 0)
@@ -905,9 +993,9 @@ int connection_route_and_start(connection_t *c) {
   if (path_len > 0 && service_path[path_len - 1] == '/')
     path_len--;
 
-  /* status_route/status_sse_route/status_api_prefix are declared here since
-   * the status SSE/API routes are matched further down, after playlist.m3u
-   * and epg.xml. */
+  /* status_route/status_sse_route/status_api_prefix/player_route/setting_route
+   * /setting_api_prefix are all computed here (not lazily at each dispatch
+   * site) so the web-auth scope check below can test against them too. */
   const char *status_route = config.status_page_route ? config.status_page_route : "status";
   size_t status_route_len = strlen(status_route);
   char status_sse_route[HTTP_URL_BUFFER_SIZE];
@@ -922,6 +1010,23 @@ int connection_route_and_start(connection_t *c) {
     strncpy(status_api_prefix, "api/", sizeof(status_api_prefix) - 1);
     status_api_prefix[sizeof(status_api_prefix) - 1] = '\0';
   }
+  size_t status_sse_route_len = strlen(status_sse_route);
+  size_t status_api_prefix_len = strlen(status_api_prefix);
+
+  const char *player_route = config.player_page_route ? config.player_page_route : "player";
+  size_t player_route_len = strlen(player_route);
+
+  const char *setting_route = config.setting_page_route ? config.setting_page_route : "setting";
+  size_t setting_route_len = strlen(setting_route);
+
+  char setting_api_prefix[HTTP_URL_BUFFER_SIZE];
+  if (setting_route_len > 0) {
+    snprintf(setting_api_prefix, sizeof(setting_api_prefix), "%s/api/", setting_route);
+  } else {
+    strncpy(setting_api_prefix, "api/", sizeof(setting_api_prefix) - 1);
+    setting_api_prefix[sizeof(setting_api_prefix) - 1] = '\0';
+  }
+  size_t setting_api_prefix_len = strlen(setting_api_prefix);
 
   /* Handle static assets first (bypass r2h-token validation for /assets/) */
   const char *assets_prefix = "assets/";
@@ -947,35 +1052,43 @@ int connection_route_and_start(connection_t *c) {
     c->should_set_r2h_cookie = (source == TOKEN_SOURCE_QUERY);
   }
 
+  /* HTTP Basic Auth for /status, /player, /setting (and their APIs/SSE),
+   * enforced only for non-local clients. Independent of r2h-token -- both
+   * may be configured and both must then pass. */
+  if (config.web_auth_user != NULL && config.web_auth_user[0] != '\0' && config.web_auth_password != NULL &&
+      config.web_auth_password[0] != '\0') {
+    int in_web_auth_scope =
+        (status_route_len == path_len && strncmp(service_path, status_route, path_len) == 0) ||
+        (status_sse_route_len == path_len && strncmp(service_path, status_sse_route, path_len) == 0) ||
+        (path_len >= status_api_prefix_len && strncmp(service_path, status_api_prefix, status_api_prefix_len) == 0) ||
+        (player_route_len == path_len && strncmp(service_path, player_route, path_len) == 0) ||
+        (setting_route_len == path_len && strncmp(service_path, setting_route, path_len) == 0) ||
+        (path_len >= setting_api_prefix_len && strncmp(service_path, setting_api_prefix, setting_api_prefix_len) == 0);
+
+    int web_auth_local_exempt = !config.web_auth_require_local && is_client_local(c);
+    if (in_web_auth_scope && !web_auth_local_exempt && !is_web_auth_valid(c)) {
+      http_send_401_basic(c);
+      return 0;
+    }
+  }
+
   if (status_route_len == path_len && strncmp(service_path, status_route, path_len) == 0) {
     handle_embedded_file(c, "/status.html");
     return 0;
   }
 
   /* Handle player page */
-  const char *player_route = config.player_page_route ? config.player_page_route : "player";
-  size_t player_route_len = strlen(player_route);
   if (player_route_len == path_len && strncmp(service_path, player_route, path_len) == 0) {
     handle_embedded_file(c, "/player.html");
     return 0;
   }
 
   /* Handle setting page */
-  const char *setting_route = config.setting_page_route ? config.setting_page_route : "setting";
-  size_t setting_route_len = strlen(setting_route);
   if (setting_route_len == path_len && strncmp(service_path, setting_route, path_len) == 0) {
     handle_embedded_file(c, "/setting.html");
     return 0;
   }
 
-  char setting_api_prefix[HTTP_URL_BUFFER_SIZE];
-  if (setting_route_len > 0) {
-    snprintf(setting_api_prefix, sizeof(setting_api_prefix), "%s/api/", setting_route);
-  } else {
-    strncpy(setting_api_prefix, "api/", sizeof(setting_api_prefix) - 1);
-    setting_api_prefix[sizeof(setting_api_prefix) - 1] = '\0';
-  }
-  size_t setting_api_prefix_len = strlen(setting_api_prefix);
   if (path_len >= setting_api_prefix_len && strncmp(service_path, setting_api_prefix, setting_api_prefix_len) == 0) {
     const char *api_name = service_path + setting_api_prefix_len;
     size_t api_name_len = path_len - setting_api_prefix_len;
@@ -1013,12 +1126,10 @@ int connection_route_and_start(connection_t *c) {
     handle_epg_request(c, 0);
     return 0;
   }
-  size_t status_sse_len = strlen(status_sse_route);
-  if (status_sse_len == path_len && strncmp(service_path, status_sse_route, path_len) == 0) {
+  if (status_sse_route_len == path_len && strncmp(service_path, status_sse_route, path_len) == 0) {
     /* Delegate SSE initialization to status module */
     return status_handle_sse_init(c);
   }
-  size_t status_api_prefix_len = strlen(status_api_prefix);
   if (path_len >= status_api_prefix_len && strncmp(service_path, status_api_prefix, status_api_prefix_len) == 0) {
     const char *api_name = service_path + status_api_prefix_len;
     size_t api_name_len = path_len - status_api_prefix_len;
