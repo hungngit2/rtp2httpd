@@ -32,13 +32,19 @@ prompt; only clients determined to be non-local are challenged.
 
 ### Config
 
-Two new optional string fields in `[global]`, following the existing
-`r2h-token` pattern:
+Three new optional fields in `[global]`:
 
-- `web-auth-user`
-- `web-auth-password`
+- `web-auth-user` (string), following the existing `r2h-token` pattern.
+- `web-auth-password` (string), same pattern.
+- `web-auth-require-local` (boolean, default `0`/off) — when off (default),
+  local/private-network clients bypass Basic Auth per the Local-network
+  detection section below. When on, Basic Auth is required for **every**
+  client, including local/LAN ones. Follows the existing `xff`/`use-relative-path-in-m3u`
+  boolean-field pattern.
 
-Enforcement is active only when **both** are non-empty. Both are added to
+Enforcement is active only when `web-auth-user` and `web-auth-password` are
+both non-empty; `web-auth-require-local` only changes whether the local
+bypass applies once enforcement is otherwise active. All three are added to
 `SETTING_FIELDS` in `src/settings_api.c` so they're editable from the
 `/setting` page (advanced tab, next to `r2h-token`), and to
 `web-ui/src/lib/setting-fields.ts` / `web-ui/src/i18n/setting.ts` (en, zh,
@@ -80,7 +86,8 @@ set. It does not affect stream/service routes at all.
 
 Logic, when `config.web_auth_user`/`config.web_auth_password` are both set:
 
-1. If `is_client_local(c)` → skip, no auth required.
+1. If `!config.web_auth_require_local && is_client_local(c)` → skip, no
+   auth required.
 2. Else, look for `c->http_req.authorization` matching
    `Basic <base64(user:pass)>` with the configured credentials.
 3. Missing header, malformed header, or mismatched credentials → send 401
@@ -103,12 +110,14 @@ Logic, when `config.web_auth_user`/`config.web_auth_password` are both set:
 - `src/connection.c`: `is_client_local()` + the Basic Auth enforcement
   block described above.
 - `src/configuration.h`/`.c`: `web_auth_user`, `web_auth_password` fields
-  (default `NULL`), CLI/config-file parsing following the existing
-  string-field pattern (e.g. `r2h_token`).
-- `src/settings_api.c`: add both fields to `SETTING_FIELDS`.
-- Frontend: `web-ui/src/lib/setting-fields.ts` (`advanced` tab, password
-  field masked like a password input) and `web-ui/src/i18n/setting.ts`
-  (en/zh/zh-TW labels).
+  (default `NULL`), `web_auth_require_local` field (default `0`),
+  CLI/config-file parsing following the existing string-field pattern
+  (e.g. `r2h_token`) and boolean-field pattern (e.g. `xff`).
+- `src/settings_api.c`: add all three fields to `SETTING_FIELDS`
+  (`web-auth-require-local` as `FT_BOOL`).
+- Frontend: `web-ui/src/lib/setting-fields.ts` (`advanced` tab; `web-auth-user`/
+  `web-auth-password` as text fields, `web-auth-require-local` as a checkbox)
+  and `web-ui/src/i18n/setting.ts` (en/zh/zh-TW labels).
 - Docs: extend the existing `/setting`-exposure security note in
   `docs/guide/installation.md` / `docs/en/guide/installation.md` to
   recommend `web-auth-user`/`web-auth-password` for internet-facing
@@ -129,6 +138,8 @@ Logic, when `config.web_auth_user`/`config.web_auth_password` are both set:
   Basic Auth (confirms scope is pages/APIs only).
 - `r2h-token` and Basic Auth configured together: a non-local request needs
   both to succeed.
+- With `web-auth-require-local = 1`, a local (loopback) client is also
+  challenged for `/status`/`/player`/`/setting`.
 
 ## Open questions
 

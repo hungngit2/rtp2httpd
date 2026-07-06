@@ -4,7 +4,7 @@
 
 **Goal:** Require HTTP Basic Auth on `/status`, `/player`, `/setting` (and their APIs/SSE) for non-local clients, when `web-auth-user`/`web-auth-password` are configured.
 
-**Architecture:** A new `is_client_local()` check in `connection.c` classifies the request's effective client address (raw socket peer, or the first `X-Forwarded-For` hop when `xff` is enabled) as local/private or not. A new Basic Auth check runs right after the existing r2h-token check, scoped only to the three page routes and their API/SSE sub-routes, and only enforced for non-local clients when both credentials are configured. Credentials live in two new plaintext config fields, following the exact pattern already used for `r2h-token`.
+**Architecture:** A new `is_client_local()` check in `connection.c` classifies the request's effective client address (raw socket peer, or the first `X-Forwarded-For` hop when `xff` is enabled) as local/private or not. A new Basic Auth check runs right after the existing r2h-token check, scoped only to the three page routes and their API/SSE sub-routes, and only enforced when both credentials are configured — for non-local clients always, and for local clients too when `web-auth-require-local` is enabled. Credentials live in two new plaintext config fields plus one boolean toggle, following the exact patterns already used for `r2h-token` and `xff`.
 
 **Tech Stack:** C11 (daemon), Python/pytest (e2e), React/TypeScript (settings UI).
 
@@ -168,7 +168,7 @@ git commit -m "feat(utils): add base64_decode helper"
 
 ---
 
-### Task 2: Config fields `web-auth-user` / `web-auth-password`
+### Task 2: Config fields `web-auth-user` / `web-auth-password` / `web-auth-require-local`
 
 **Files:**
 - Modify: `src/configuration.h`
@@ -176,7 +176,7 @@ git commit -m "feat(utils): add base64_decode helper"
 
 **Interfaces:**
 - Consumes: nothing new.
-- Produces: `config.web_auth_user` (char*, NULL default), `config.web_auth_password` (char*, NULL default) — consumed by Task 4 (`connection.c`) and Task 5 (`settings_api.c`).
+- Produces: `config.web_auth_user` (char*, NULL default), `config.web_auth_password` (char*, NULL default), `config.web_auth_require_local` (int, 0 default) — consumed by Task 4 (`connection.c`) and Task 5 (`settings_api.c`).
 
 - [ ] **Step 1: Add the fields to `config_t` in `src/configuration.h`**
 
@@ -187,9 +187,11 @@ Add after the `r2h_token` field declaration (in the "Network and service setting
   char *web_auth_user;     /* HTTP Basic Auth username for /status,/player,/setting
                                from non-local clients (NULL=disabled) */
   char *web_auth_password; /* HTTP Basic Auth password (NULL=disabled) */
+  int web_auth_require_local; /* Also require Basic Auth for local/LAN clients
+                                  (0=local bypasses auth [default], 1=always required) */
 ```
 
-- [ ] **Step 2: Add the `cmd_*_set` flag in `src/configuration.c`**
+- [ ] **Step 2: Add the `cmd_*_set` flags in `src/configuration.c`**
 
 After `int cmd_r2h_token_set = 0;` (around line 34):
 
@@ -197,11 +199,12 @@ After `int cmd_r2h_token_set = 0;` (around line 34):
 int cmd_r2h_token_set = 0;
 int cmd_web_auth_user_set = 0;
 int cmd_web_auth_password_set = 0;
+int cmd_web_auth_require_local_set = 0;
 ```
 
 - [ ] **Step 3: Free the strings in `free_config_strings()`**
 
-After the `r2h_token` free block (around line 121-122):
+After the `r2h_token` free block (around line 121-122). Note: `web_auth_require_local` is an `int`, not a string, so it needs no free — it's handled by `config_init()`'s default-reset in Step 7 instead.
 
 ```c
   if (!cmd_r2h_token_set || force_free)
@@ -214,7 +217,7 @@ After the `r2h_token` free block (around line 121-122):
 
 - [ ] **Step 4: Parse from config file in `parse_global_sec()`**
 
-After the `r2h-token` block (around line 678-684):
+After the `r2h-token` block (around line 678-684). `web-auth-require-local` follows the existing boolean pattern (compare `use-relative-path-in-m3u` at `src/configuration.c:633-636`), using the already-available `parse_bool()`:
 
 ```c
   if (strcasecmp("r2h-token", param) == 0) {
@@ -240,11 +243,17 @@ After the `r2h-token` block (around line 678-684):
     }
     return;
   }
+
+  if (strcasecmp("web-auth-require-local", param) == 0) {
+    if (set_if_not_cmd_override(cmd_web_auth_require_local_set, "web-auth-require-local"))
+      config.web_auth_require_local = parse_bool(value);
+    return;
+  }
 ```
 
 - [ ] **Step 5: Add to `config_snapshot()`**
 
-In the NULL-out block (around line 1087, after `snapshot->r2h_token = NULL;`):
+In the NULL-out block (around line 1087, after `snapshot->r2h_token = NULL;`) — only the two string fields need NULLing, `web_auth_require_local` is a plain `int` already copied by the earlier `*snapshot = config;` struct copy:
 
 ```c
   snapshot->r2h_token = NULL;
@@ -272,7 +281,8 @@ enum long_option_e {
   OPT_LOG_FORMAT,
   OPT_SETTING_PAGE_PATH,
   OPT_WEB_AUTH_USER,
-  OPT_WEB_AUTH_PASSWORD
+  OPT_WEB_AUTH_PASSWORD,
+  OPT_WEB_AUTH_REQUIRE_LOCAL
 };
 ```
 
@@ -282,9 +292,10 @@ Add to the `long_options[]` array (after the `{"setting-page-path", ...}` entry,
                                     {"setting-page-path", required_argument, 0, OPT_SETTING_PAGE_PATH},
                                     {"web-auth-user", required_argument, 0, OPT_WEB_AUTH_USER},
                                     {"web-auth-password", required_argument, 0, OPT_WEB_AUTH_PASSWORD},
+                                    {"web-auth-require-local", no_argument, 0, OPT_WEB_AUTH_REQUIRE_LOCAL},
 ```
 
-Add the `case` handlers in the `getopt_long` switch (after the `case OPT_SETTING_PAGE_PATH:` block, around line 1566-1569):
+Add the `case` handlers in the `getopt_long` switch (after the `case OPT_SETTING_PAGE_PATH:` block, around line 1566-1569). The boolean case follows the `OPT_USE_RELATIVE_PATH_IN_M3U` pattern (`src/configuration.c:1574-1577`) — `no_argument` options set the flag to `1` directly, they don't call `parse_bool`:
 
 ```c
     case OPT_SETTING_PAGE_PATH:
@@ -301,9 +312,24 @@ Add the `case` handlers in the `getopt_long` switch (after the `case OPT_SETTING
       config.web_auth_password = strdup(optarg);
       cmd_web_auth_password_set = 1;
       break;
+    case OPT_WEB_AUTH_REQUIRE_LOCAL:
+      config.web_auth_require_local = 1;
+      cmd_web_auth_require_local_set = 1;
+      break;
 ```
 
-- [ ] **Step 7: Add to `usage()` help text**
+- [ ] **Step 7: Add the default reset in `config_init()`**
+
+Find the block of `if (!cmd_..._set) config...= 0;` boolean-default resets (around `src/configuration.c:1176-1184`, alongside `cmd_xff_set`/`cmd_use_relative_path_in_m3u_set`) and add:
+
+```c
+  if (!cmd_xff_set)
+    config.xff = 0;
+  if (!cmd_web_auth_require_local_set)
+    config.web_auth_require_local = 0;
+```
+
+- [ ] **Step 8: Add to `usage()` help text**
 
 After the `--setting-page-path` usage line (`src/configuration.c` around line 1345):
 
@@ -312,9 +338,11 @@ After the `--setting-page-path` usage line (`src/configuration.c` around line 13
           "/status,/player,/setting from non-local clients (default: disabled)\n"
           "\t   --web-auth-password <password>  HTTP Basic Auth password "
           "(default: disabled)\n"
+          "\t   --web-auth-require-local  Also require HTTP Basic Auth for "
+          "local/LAN clients (default: off, local bypasses auth)\n"
 ```
 
-- [ ] **Step 8: Build**
+- [ ] **Step 9: Build**
 
 ```bash
 cmake --build build -j
@@ -322,11 +350,11 @@ cmake --build build -j
 
 Expected: builds successfully with no new warnings/errors.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 10: Commit**
 
 ```bash
 git add src/configuration.h src/configuration.c
-git commit -m "feat(config): add web-auth-user/web-auth-password fields"
+git commit -m "feat(config): add web-auth-user/password/require-local fields"
 ```
 
 ---
@@ -394,7 +422,7 @@ git commit -m "feat(http): capture Authorization header"
 - Test: `e2e/test_pages.py` (new test class)
 
 **Interfaces:**
-- Consumes: `config.web_auth_user`/`config.web_auth_password` (Task 2), `c->http_req.authorization` (Task 3), `base64_decode()` (Task 1).
+- Consumes: `config.web_auth_user`/`config.web_auth_password`/`config.web_auth_require_local` (Task 2), `c->http_req.authorization` (Task 3), `base64_decode()` (Task 1).
 - Produces: nothing consumed by later tasks — this is the last backend task.
 
 - [ ] **Step 1: Write the failing e2e test**
@@ -504,6 +532,31 @@ web-auth-password = secret
                 "/rtp/239.0.0.1:1234",
                 headers={"X-Forwarded-For": "8.8.8.8"},
                 timeout=3.0,
+            )
+            assert status == 200
+        finally:
+            r2h.stop()
+
+    def test_require_local_forces_auth_for_loopback(self, r2h_binary):
+        port = find_free_port()
+        config = f"""\
+[global]
+verbosity = 4
+web-auth-user = admin
+web-auth-password = secret
+web-auth-require-local = 1
+
+[bind]
+* {port}
+"""
+        r2h = R2HProcess(r2h_binary, port, config_content=config)
+        try:
+            r2h.start()
+            status, _, _ = http_get("127.0.0.1", port, "/status")
+            assert status == 401
+
+            status, _, _ = http_get(
+                "127.0.0.1", port, "/status", headers=self._basic_auth_header("admin", "secret")
             )
             assert status == 200
         finally:
@@ -622,7 +675,8 @@ Replace the block from the `status_route`/`status_sse_route`/`status_api_prefix`
         (setting_route_len == path_len && strncmp(service_path, setting_route, path_len) == 0) ||
         (path_len >= setting_api_prefix_len && strncmp(service_path, setting_api_prefix, setting_api_prefix_len) == 0);
 
-    if (in_web_auth_scope && !is_client_local(c) && !is_web_auth_valid(c)) {
+    int web_auth_local_exempt = !config.web_auth_require_local && is_client_local(c);
+    if (in_web_auth_scope && !web_auth_local_exempt && !is_web_auth_valid(c)) {
       http_send_401_basic(c);
       return 0;
     }
@@ -748,7 +802,7 @@ Expected: builds successfully. Fix any duplicate-declaration compile errors by r
 python3 -m pytest e2e/test_pages.py::TestWebBasicAuth -v
 ```
 
-Expected: all 4 tests in `TestWebBasicAuth` PASS.
+Expected: all 5 tests in `TestWebBasicAuth` PASS.
 
 - [ ] **Step 8: Run the full `test_pages.py` file to confirm no regressions**
 
@@ -773,10 +827,10 @@ git commit -m "feat(connection): add HTTP Basic Auth for non-local status/player
 - Modify: `src/settings_api.c`
 
 **Interfaces:**
-- Consumes: `config.web_auth_user`/`config.web_auth_password` (Task 2).
+- Consumes: `config.web_auth_user`/`config.web_auth_password`/`config.web_auth_require_local` (Task 2).
 - Produces: nothing new — `SETTING_FIELDS` is consumed generically by the existing `handle_get_config`/`handle_save_config`.
 
-- [ ] **Step 1: Add both fields to `SETTING_FIELDS`**
+- [ ] **Step 1: Add all three fields to `SETTING_FIELDS`**
 
 In `src/settings_api.c`, after the `{"r2h-token", ...}` entry:
 
@@ -784,6 +838,7 @@ In `src/settings_api.c`, after the `{"r2h-token", ...}` entry:
     {"r2h-token", FT_STRING, offsetof(config_t, r2h_token)},
     {"web-auth-user", FT_STRING, offsetof(config_t, web_auth_user)},
     {"web-auth-password", FT_STRING, offsetof(config_t, web_auth_password)},
+    {"web-auth-require-local", FT_BOOL, offsetof(config_t, web_auth_require_local)},
 ```
 
 - [ ] **Step 2: Build**
@@ -807,7 +862,7 @@ def test_web_auth_fields_round_trip(r2h_binary):
             port,
             "POST",
             "/setting/api/save-config",
-            body=b"web-auth-user=admin&web-auth-password=secret",
+            body=b"web-auth-user=admin&web-auth-password=secret&web-auth-require-local=1",
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         assert status == 200
@@ -817,6 +872,7 @@ def test_web_auth_fields_round_trip(r2h_binary):
         data = json.loads(body)
         assert data["web-auth-user"] == "admin"
         assert data["web-auth-password"] == "secret"
+        assert data["web-auth-require-local"] is True
     finally:
         r2h.stop()
 ```
@@ -827,13 +883,13 @@ Run it:
 python3 -m pytest e2e/test_config.py::test_web_auth_fields_round_trip -v
 ```
 
-Expected: PASS (the table-driven `handle_get_config`/`handle_save_config` need no code changes beyond the `SETTING_FIELDS` entry, per the existing `r2h-token` precedent).
+Expected: PASS (the table-driven `handle_get_config`/`handle_save_config` need no code changes beyond the `SETTING_FIELDS` entries, per the existing `r2h-token`/`xff` precedents — check how `handle_get_config` serializes `FT_BOOL` fields to confirm whether it's a JSON boolean or `0`/`1`, and adjust the assertion to match the existing convention rather than assuming).
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add src/settings_api.c e2e/test_config.py
-git commit -m "feat(settings-api): expose web-auth-user/web-auth-password"
+git commit -m "feat(settings-api): expose web-auth-user/password/require-local"
 ```
 
 ---
@@ -845,10 +901,10 @@ git commit -m "feat(settings-api): expose web-auth-user/web-auth-password"
 - Modify: `web-ui/src/i18n/setting.ts`
 
 **Interfaces:**
-- Consumes: the `web-auth-user`/`web-auth-password` keys now returned by `get-config` (Task 5).
+- Consumes: the `web-auth-user`/`web-auth-password`/`web-auth-require-local` keys now returned by `get-config` (Task 5).
 - Produces: nothing consumed by later tasks.
 
-- [ ] **Step 1: Add both fields to `SETTING_FIELDS` in `web-ui/src/lib/setting-fields.ts`**
+- [ ] **Step 1: Add all three fields to `SETTING_FIELDS` in `web-ui/src/lib/setting-fields.ts`**
 
 After the `{ key: "r2h-token", ... }` entry:
 
@@ -856,6 +912,7 @@ After the `{ key: "r2h-token", ... }` entry:
   { key: "r2h-token", tab: "advanced", type: "text", labelKey: "r2hToken" },
   { key: "web-auth-user", tab: "advanced", type: "text", labelKey: "webAuthUser" },
   { key: "web-auth-password", tab: "advanced", type: "text", labelKey: "webAuthPassword" },
+  { key: "web-auth-require-local", tab: "advanced", type: "checkbox", labelKey: "webAuthRequireLocal" },
 ```
 
 - [ ] **Step 2: Add i18n labels to `web-ui/src/i18n/setting.ts`**
@@ -866,6 +923,7 @@ In the `base` (English) dict, after `r2hToken: "Access Token",`:
   r2hToken: "Access Token",
   webAuthUser: "Web Auth Username",
   webAuthPassword: "Web Auth Password",
+  webAuthRequireLocal: "Require Auth for Local Network",
 ```
 
 In the Simplified Chinese dict, after `r2hToken: "访问令牌",`:
@@ -874,6 +932,7 @@ In the Simplified Chinese dict, after `r2hToken: "访问令牌",`:
   r2hToken: "访问令牌",
   webAuthUser: "网页认证用户名",
   webAuthPassword: "网页认证密码",
+  webAuthRequireLocal: "本地网络也需要认证",
 ```
 
 In the Traditional Chinese dict, after `r2hToken: "存取權杖",`:
@@ -882,6 +941,7 @@ In the Traditional Chinese dict, after `r2hToken: "存取權杖",`:
   r2hToken: "存取權杖",
   webAuthUser: "網頁認證使用者名稱",
   webAuthPassword: "網頁認證密碼",
+  webAuthRequireLocal: "本機網路也需要認證",
 ```
 
 - [ ] **Step 3: Rebuild the web UI and verify the fields render**
@@ -935,7 +995,7 @@ grep -n "r2h-token\|ffmpeg-args\|RCE" docs/guide/installation.md docs/en/guide/i
 
 - [ ] **Step 2: Extend the Chinese doc**
 
-Read the surrounding paragraph in `docs/guide/installation.md` first, then add a sentence recommending `web-auth-user`/`web-auth-password` as a second, browser-native option alongside `r2h-token` for internet-facing deployments — matching the existing tone/format of that section.
+Read the surrounding paragraph in `docs/guide/installation.md` first, then add a sentence recommending `web-auth-user`/`web-auth-password` as a second, browser-native option alongside `r2h-token` for internet-facing deployments — matching the existing tone/format of that section. Mention that local/LAN clients bypass this prompt by default, and that `web-auth-require-local` can be enabled (from the same `/setting` page) to require it everywhere, including the LAN, for deployments that want it always-on.
 
 - [ ] **Step 3: Translate the change to English**
 
@@ -970,7 +1030,16 @@ rm -rf build && cmake -B build && cmake --build build -j
 
 Expected: clean build, no errors.
 
-- [ ] **Step 3: Push the branch and open a PR**
+- [ ] **Step 3: Sync the fork with upstream before pushing**
+
+Per this project's established release workflow, sync the fork with `stackia/rtp2httpd` before opening the PR (avoids a stale-fork surprise at merge time):
+
+```bash
+gh repo set-default hungngit2/rtp2httpd
+gh repo sync hungngit2/rtp2httpd
+```
+
+- [ ] **Step 4: Push the branch and open a PR**
 
 This work should already be on a feature branch (created before Task 1 per `superpowers:using-git-worktrees`/standard git flow — if not, create one now: `git checkout -b feat/web-basic-auth main`).
 
@@ -979,18 +1048,20 @@ git push -u origin feat/web-basic-auth
 gh pr create --title "feat: HTTP Basic Auth for status/player/setting" --body "$(cat <<'EOF'
 ## Summary
 - Adds optional `web-auth-user`/`web-auth-password` config to require HTTP Basic Auth on `/status`, `/player`, `/setting` (and their APIs/SSE) for non-local clients only
-- LAN/private-network clients are unaffected; independent of the existing `r2h-token` mechanism
+- LAN/private-network clients are unaffected by default; `web-auth-require-local` can force auth everywhere, including LAN
+- Independent of the existing `r2h-token` mechanism
 
 ## Test plan
 - [x] e2e: local client bypasses auth
 - [x] e2e: non-local client challenged, correct/incorrect credentials
 - [x] e2e: stream routes unaffected
+- [x] e2e: web-auth-require-local forces auth for loopback
 - [x] Full e2e suite passes
 EOF
 )"
 ```
 
-- [ ] **Step 4: Wait for CI, fix any failures**
+- [ ] **Step 5: Wait for CI, fix any failures**
 
 ```bash
 gh pr checks <PR_NUMBER> --watch
@@ -998,20 +1069,20 @@ gh pr checks <PR_NUMBER> --watch
 
 If any check fails, diagnose via `gh run view <RUN_ID> --log-failed` (as done for PR #8's ruff-format and clang-format failures) and push fixes as new commits.
 
-- [ ] **Step 5: Merge to main**
+- [ ] **Step 6: Merge to main**
 
 ```bash
 gh pr merge <PR_NUMBER> --squash --delete-branch
 ```
 
-- [ ] **Step 6: Sync local main**
+- [ ] **Step 7: Sync local main**
 
 ```bash
 git checkout main
 git pull origin main
 ```
 
-- [ ] **Step 7: Re-cut and publish the v1.0.1 release**
+- [ ] **Step 8: Re-cut and publish the v1.0.1 release**
 
 Follow the same release flow used for v1.0.0 (tag at the merge commit, write release notes covering this feature, `gh release create`):
 
@@ -1021,12 +1092,12 @@ git push origin v1.0.1
 gh release create v1.0.1 --title "v1.0.1" --notes "$(cat <<'EOF'
 ## New Features
 
-- Added optional HTTP Basic Auth (`web-auth-user`/`web-auth-password`, configurable from the `/setting` page) protecting `/status`, `/player`, and `/setting` when accessed from outside your local network — LAN access remains password-free
+- Added optional HTTP Basic Auth (`web-auth-user`/`web-auth-password`, configurable from the `/setting` page) protecting `/status`, `/player`, and `/setting` when accessed from outside your local network — LAN access remains password-free by default, or can be required everywhere via `web-auth-require-local`
 EOF
 )"
 ```
 
-- [ ] **Step 8: Confirm the release**
+- [ ] **Step 9: Confirm the release**
 
 ```bash
 gh release view v1.0.1
