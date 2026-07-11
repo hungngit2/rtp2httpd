@@ -1,6 +1,15 @@
 import { clsx } from "clsx";
-import { Play } from "lucide-react";
-import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
+import { CircleAlert, Play } from "lucide-react";
+import {
+  type MouseEvent as ReactMouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { createPortal } from "react-dom";
 import { usePlayerTranslation } from "../../hooks/use-player-translation";
 import {
@@ -20,6 +29,8 @@ import {
   isSupported,
   type Player,
   type PlayerError,
+  type PlayerMediaInfo,
+  type PlayerRenderState,
   type PlayerSegment,
 } from "../../mpegts";
 import {
@@ -33,6 +44,7 @@ import mp2WasmUrl from "../../mpegts/wasm/minimp3/mp2_decoder.wasm?url";
 import type { Channel, EPGProgram } from "../../types/player";
 import { PLAYER_OVERLAY_SURFACE_CLASS } from "./classnames";
 import { PlayerControls } from "./player-controls";
+import { PlayerSelectedGlassLayers } from "./player-selected-glass-layers";
 
 interface VideoPlayerProps {
   channel: Channel | null;
@@ -59,7 +71,17 @@ interface VideoPlayerProps {
   onPlaybackStarted?: () => void;
 }
 
+interface PlaybackErrorDisplay {
+  message: string;
+  description?: string;
+  statusCode?: number;
+  statusText?: string;
+  requestUrl?: string;
+  suggestion?: string;
+}
+
 const MAX_RETRIES = 3;
+const INACTIVE_RENDER_STATE: PlayerRenderState = { active: false, deinterlacing: false };
 
 type SlotId = "a" | "b";
 
@@ -82,6 +104,15 @@ function isInterruptedPlayError(err: unknown): boolean {
 
 function ignoreInterruptedPlayError(err: unknown): void {
   if (!isInterruptedPlayError(err)) throw err;
+}
+
+function decodeRequestUrl(url: string): string {
+  try {
+    return decodeURI(url);
+  } catch {
+    // Keep the original URL visible when an upstream returns malformed percent encoding.
+    return url;
+  }
 }
 
 function getEventDocument(event: Event): Document {
@@ -155,25 +186,28 @@ function PlayerTopLeftOverlay({
     <div
       className={clsx(
         PLAYER_OVERLAY_SURFACE_CLASS,
-        "absolute top-4 left-4 z-10 flex items-center gap-1.5 rounded-lg px-2 py-1.5 transition-opacity duration-300 md:top-8 md:left-8 md:gap-2 md:px-3 md:py-2",
+        "absolute top-4 left-4 z-10 max-w-[calc(100%-2rem)] rounded-xl px-2 py-1.5 transition-opacity duration-300 md:top-8 md:left-8 md:px-3 md:py-2",
         visible ? "opacity-100" : "opacity-0 pointer-events-none",
       )}
     >
-      <span className="text-xs md:text-base text-white font-medium tabular-nums">
-        {time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-      </span>
-      {loading && (
-        <>
-          <span className="text-xs md:text-sm text-white/50" aria-hidden="true">
-            ·
-          </span>
-          <div className="relative h-3 w-3 md:h-3.5 md:w-3.5 shrink-0">
-            <div className="absolute inset-0 rounded-full border border-white/30" />
-            <div className="absolute inset-0 rounded-full border border-white border-t-transparent animate-spin" />
-          </div>
-          <span className="text-xs md:text-sm text-white/70">{loadingText}</span>
-        </>
-      )}
+      <PlayerSelectedGlassLayers />
+      <div className="relative z-10 flex min-w-0 items-center gap-1.5 md:gap-2">
+        <span className="shrink-0 font-medium text-xs text-blue-50 tabular-nums drop-shadow-sm md:text-base">
+          {time.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+        </span>
+        {loading && (
+          <>
+            <span className="shrink-0 text-blue-100/35 text-xs md:text-sm" aria-hidden="true">
+              ·
+            </span>
+            <div className="relative h-3 w-3 shrink-0 md:h-3.5 md:w-3.5">
+              <div className="absolute inset-0 rounded-full border border-blue-100/25" />
+              <div className="absolute inset-0 animate-spin rounded-full border border-blue-200 border-t-transparent shadow-[0_0_8px_rgba(147,197,253,0.5)]" />
+            </div>
+            <span className="min-w-0 truncate text-blue-50/70 text-xs md:text-sm">{loadingText}</span>
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -221,6 +255,10 @@ export function VideoPlayer({
   const slotLiveStateRef = useRef<Record<SlotId, boolean>>({ a: true, b: true });
   const activeSlotIdRef = useRef<SlotId>("a");
   const [visibleSlotId, setVisibleSlotId] = useState<SlotId>("a");
+  const [slotMediaInfo, setSlotMediaInfo] = useState<Record<SlotId, PlayerMediaInfo | null>>({
+    a: null,
+    b: null,
+  });
   const transitionGenRef = useRef(0);
   const pendingTransitionRef = useRef<PendingTransition | null>(null);
   const hasStartedPlaybackRef = useRef(false);
@@ -232,12 +270,22 @@ export function VideoPlayer({
   const slotCanvasRef = (id: SlotId) => (id === "a" ? slotACanvasRef : slotBCanvasRef);
   const slotPlayerRef = (id: SlotId) => (id === "a" ? slotAPlayerRef : slotBPlayerRef);
 
-  const [renderActiveSlots, setRenderActiveSlots] = useState<Record<SlotId, boolean>>({
-    a: false,
-    b: false,
+  const [slotRenderStates, setSlotRenderStates] = useState<Record<SlotId, PlayerRenderState>>({
+    a: INACTIVE_RENDER_STATE,
+    b: INACTIVE_RENDER_STATE,
   });
-  const setRenderActiveSlot = (slotId: SlotId, active: boolean) =>
-    setRenderActiveSlots((prev) => (prev[slotId] === active ? prev : { ...prev, [slotId]: active }));
+  const setSlotRenderState = (slotId: SlotId, renderState: PlayerRenderState) =>
+    setSlotRenderStates((previousStates) =>
+      previousStates[slotId].active === renderState.active &&
+      previousStates[slotId].detectedScanType === renderState.detectedScanType &&
+      previousStates[slotId].deinterlacing === renderState.deinterlacing
+        ? previousStates
+        : { ...previousStates, [slotId]: renderState },
+    );
+  const renderActiveSlots = {
+    a: slotRenderStates.a.active,
+    b: slotRenderStates.b.active,
+  };
 
   const getActiveSlotId = () => activeSlotIdRef.current;
   const getActiveVideo = () => slotVideoRef(getActiveSlotId()).current;
@@ -246,7 +294,9 @@ export function VideoPlayer({
   const [isLoading, setIsLoading] = useState(false);
   const [showLoading, setShowLoading] = useState(false);
   const loadingTimeoutRef = useRef<number>(0);
-  const [error, setError] = useState<string | null>(() => (isSupported() ? null : t("mseNotSupported")));
+  const [error, setError] = useState<PlaybackErrorDisplay | null>(() =>
+    isSupported() ? null : { message: t("mseNotSupported") },
+  );
   const [volume, setVolume] = useState(() => getVolume());
   const [isMuted, setIsMuted] = useState(() => getMuted());
   const [isPlaying, setIsPlaying] = useState(false);
@@ -399,6 +449,46 @@ export function VideoPlayer({
     setShowControls(false);
   }, []);
 
+  // Hover model for pointers that have a real hover state (mouse / pen):
+  // enter or move shows controls and resets the 3s idle timer, leaving hides them.
+  // Touch has no hover — taps synthesize compatibility mouse events that would
+  // otherwise race enter/leave — so we ignore touch here and let the click
+  // handler own toggling for that input type. No conflict detection needed.
+  const handlePointerHover = useCallback(
+    (event: ReactPointerEvent) => {
+      if (event.pointerType === "touch") return;
+      showControlsImmediately();
+    },
+    [showControlsImmediately],
+  );
+
+  const handlePointerLeave = useCallback(
+    (event: ReactPointerEvent) => {
+      if (event.pointerType === "touch") return;
+      hideControlsImmediately();
+    },
+    [hideControlsImmediately],
+  );
+
+  // Click / tap toggles controls. The handler lives on the whole player surface (not
+  // just the <video>) so taps on the letterbox bars outside the 16:9 frame — common on
+  // desktop/tablet where the surface is taller/wider than the video — toggle too. We
+  // only act when the click lands on the surface itself or the video element; overlays
+  // (toolbar buttons, channel info) sit above and own their own clicks, so a click that
+  // bubbles up from them is ignored and never dismisses the controls.
+  const handleSurfaceClick = useCallback(
+    (event: ReactMouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target !== event.currentTarget && target.tagName !== "VIDEO") return;
+      if (showControls) {
+        hideControlsImmediately();
+      } else {
+        showControlsImmediately();
+      }
+    },
+    [showControls, hideControlsImmediately, showControlsImmediately],
+  );
+
   // Start auto-hide timer on mount
   useEffect(() => {
     resetControlsTimer();
@@ -461,7 +551,7 @@ export function VideoPlayer({
   const destroySlot = useEffectEvent((slotId: SlotId) => {
     slotPlayerRef(slotId).current?.destroy();
     slotPlayerRef(slotId).current = null;
-    setRenderActiveSlot(slotId, false);
+    setSlotRenderState(slotId, INACTIVE_RENDER_STATE);
   });
 
   const stopPendingTransition = useEffectEvent(() => {
@@ -559,7 +649,9 @@ export function VideoPlayer({
     }
 
     let errorMessage = t("playbackError");
+    let errorDisplay: PlaybackErrorDisplay = { message: errorMessage };
     let decodingErrorRetry = false;
+    const isHttpStatusError = playerError.category === "io" && playerError.detail === "HttpStatusCodeInvalid";
 
     if (playerError.category === "media") {
       if (playerError.detail === "MediaMSEError") {
@@ -582,7 +674,28 @@ export function VideoPlayer({
         errorMessage = `${t("mediaError")}: ${playerError.detail}`;
       }
     } else if (playerError.category === "io") {
-      errorMessage = `${t("networkError")}: ${playerError.detail}`;
+      if (isHttpStatusError) {
+        const status = [playerError.code, playerError.info]
+          .filter((value) => value !== undefined && value !== "")
+          .join(" ");
+        errorMessage = `${t("upstreamRequestFailed")}${status ? `: HTTP ${status}` : ""}${
+          playerError.url ? ` (${playerError.url})` : ""
+        }`;
+        errorDisplay = {
+          message: t("upstreamRequestFailed"),
+          description: t("upstreamRequestFailedDescription"),
+          statusCode: playerError.code,
+          statusText: playerError.info,
+          requestUrl: playerError.url ? decodeRequestUrl(playerError.url) : undefined,
+          suggestion: t("upstreamRequestFailedSuggestion"),
+        };
+      } else {
+        errorMessage = `${t("networkError")}: ${playerError.detail}${playerError.info ? `: ${playerError.info}` : ""}`;
+      }
+    }
+
+    if (!isHttpStatusError) {
+      errorDisplay = { message: errorMessage };
     }
 
     // Check if we should retry
@@ -617,7 +730,7 @@ export function VideoPlayer({
     }
 
     // No more sources to try, show error
-    setError(errorMessage);
+    setError(errorDisplay);
     onError?.(errorMessage);
     setIsLoading(false);
   });
@@ -699,9 +812,14 @@ export function VideoPlayer({
         handleAudioSuspended();
       }
     });
-    p.on("render-active-change", (active) => {
+    p.on("render-state-change", (renderState) => {
       if (slotPlayerRef(slotId).current === p) {
-        setRenderActiveSlot(slotId, active);
+        setSlotRenderState(slotId, renderState);
+      }
+    });
+    p.on("media-info", (mediaInfo) => {
+      if (slotPlayerRef(slotId).current === p) {
+        setSlotMediaInfo((previousMediaInfo) => ({ ...previousMediaInfo, [slotId]: mediaInfo }));
       }
     });
     applyPlayerSettings(p);
@@ -735,6 +853,7 @@ export function VideoPlayer({
   );
 
   const loadActiveSlotSegments = useEffectEvent((player: Player, slotId: SlotId, newSegments: PlayerSegment[]) => {
+    setSlotMediaInfo((previousMediaInfo) => ({ ...previousMediaInfo, [slotId]: null }));
     player.loadSegments(newSegments);
 
     if (shouldAutoPlayRef.current) {
@@ -853,6 +972,7 @@ export function VideoPlayer({
     // The pending slot's player resets its interlace verdict on loadSegments and
     // starts detecting while hidden, so an interlaced verdict can be ready the
     // moment the switch completes (no combing flash on channel change)
+    setSlotMediaInfo((previousMediaInfo) => ({ ...previousMediaInfo, [pendingId]: null }));
     pendingPlayer.loadSegments(newSegments);
 
     if (shouldAutoPlayRef.current) {
@@ -1018,8 +1138,11 @@ export function VideoPlayer({
     // Note: video.paused may still report false in this state.
     const mediaDead = video.error !== null;
     const behindLiveMs = Date.now() - (streamStartTime.getTime() + currentVideoTime * 1000);
+    // Beyond this lag a live-edge reload beats letting live-sync chase at 2x
+    // for tens of seconds; tied to the sync config rather than a magic 10s.
+    const staleLiveMs = (defaultConfig.liveSyncMaxLatency + 5) * 1000;
 
-    if (playMode === "live" && (mediaDead || behindLiveMs > 10000)) {
+    if (playMode === "live" && (mediaDead || behindLiveMs > staleLiveMs)) {
       // Dead session or stale buffer — rebuild the stream at the live edge
       console.log("Reloading at live edge after background suspension");
       shouldAutoPlayRef.current = true;
@@ -1241,14 +1364,6 @@ export function VideoPlayer({
     };
   }, [isDocumentPiP]);
 
-  const handleVideoClick = useCallback(() => {
-    if (showControls) {
-      hideControlsImmediately();
-    } else {
-      showControlsImmediately();
-    }
-  }, [showControls, hideControlsImmediately, showControlsImmediately]);
-
   const handleMuteToggle = useEffectEvent(() => {
     const video = getActiveVideo();
     if (video) {
@@ -1369,7 +1484,7 @@ export function VideoPlayer({
     video.play()?.catch((err: Error) => {
       if (isInterruptedPlayError(err)) return;
       console.error("Play error after user interaction:", err);
-      setError(`${t("failedToPlay")}: ${err.message}`);
+      setError({ message: `${t("failedToPlay")}: ${err.message}` });
       onError?.(`${t("failedToPlay")}: ${err.message}`);
     });
   });
@@ -1397,16 +1512,19 @@ export function VideoPlayer({
 
   const isVideoPiP = isPiP && !isDocumentPiP;
   const playerSurface = (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: surface click only toggles chrome visibility; keyboard users drive the real controls via focusable buttons and global key shortcuts
     <div
       role="application"
       ref={playerSurfaceRef}
       className={clsx(
-        "@container-size/video relative flex aspect-video w-full min-h-0 items-center justify-center bg-black",
+        "dark @container-size/video relative flex aspect-video w-full min-h-0 items-center justify-center bg-[radial-gradient(circle_at_50%_35%,#102044_0%,#050b18_58%,#01030a_100%)]",
         isDocumentPiP ? "h-screen min-h-screen aspect-auto" : "md:aspect-auto md:h-full",
         !showControls && "cursor-none",
       )}
-      onMouseMove={showControlsImmediately}
-      onMouseLeave={hideControlsImmediately}
+      onPointerEnter={handlePointerHover}
+      onPointerMove={handlePointerHover}
+      onPointerLeave={handlePointerLeave}
+      onClick={handleSurfaceClick}
     >
       {/* Player area sizes the 16:9 frame via container queries; sources stretch to 16:9 inside it. */}
       <div className="relative aspect-video h-auto max-h-full w-full max-w-full overflow-hidden [@container_video_(max-aspect-ratio:_16/9)]:h-auto [@container_video_(max-aspect-ratio:_16/9)]:w-full [@container_video_(min-aspect-ratio:_16/9)]:h-full [@container_video_(min-aspect-ratio:_16/9)]:w-auto">
@@ -1427,7 +1545,6 @@ export function VideoPlayer({
               playsInline
               webkit-playsinline="true"
               x5-playsinline="true"
-              onClick={visibleSlotId === slotId ? handleVideoClick : undefined}
             />
             <canvas
               ref={slotId === "a" ? slotACanvasRef : slotBCanvasRef}
@@ -1457,43 +1574,44 @@ export function VideoPlayer({
         <div
           className={clsx(
             "absolute top-4 right-4 md:top-8 md:right-8 z-10 flex flex-col gap-2 md:gap-3 items-end transition-opacity duration-300",
-            showControls ? "opacity-100" : "opacity-0",
+            showControls ? "opacity-100" : "opacity-0 pointer-events-none",
           )}
         >
           <div
             className={clsx(
               PLAYER_OVERLAY_SURFACE_CLASS,
-              "flex max-w-[calc(100vw-2rem)] flex-col items-center justify-center gap-1.5 overflow-hidden rounded-lg px-2 py-1.5 md:max-w-none md:gap-2 md:px-3 md:py-2",
+              "relative flex max-w-[calc(100vw-2rem)] flex-col items-center justify-center gap-1.5 overflow-hidden rounded-xl px-2 py-1.5 md:max-w-none md:gap-2 md:px-3 md:py-2",
             )}
           >
+            <PlayerSelectedGlassLayers />
             {channel.logo && (
               <img
                 src={channel.logo}
                 alt={channel.name}
                 referrerPolicy="no-referrer"
-                className="h-8 w-20 md:h-14 md:w-36 object-contain"
+                className="relative z-10 h-8 w-20 object-contain drop-shadow-[0_0_14px_rgba(147,197,253,0.2)] md:h-14 md:w-36"
                 onError={(e) => {
                   (e.target as HTMLImageElement).style.display = "none";
                 }}
               />
             )}
-            <div className="flex items-center justify-center w-full">
-              <div className="flex items-center gap-1.5 md:gap-2 min-w-0">
+            <div className="relative z-10 flex w-full min-w-0 items-center justify-center">
+              <div className="flex min-w-0 items-center gap-1.5 md:gap-2">
                 <span
                   className={clsx(
-                    "rounded px-1 py-0.5 md:px-1.5 text-[10px] md:text-xs font-medium shrink-0 transition-[color,background-color,box-shadow,scale] duration-300",
+                    "shrink-0 rounded-md px-1 py-0.5 font-semibold text-[10px] transition-[color,background-color,box-shadow,scale] duration-300 md:px-1.5 md:text-xs",
                     digitBuffer
-                      ? "bg-primary text-primary-foreground scale-110 shadow-lg ring-2 ring-primary/50"
-                      : "bg-white/10 text-white/60",
+                      ? "scale-110 bg-[linear-gradient(135deg,#3b82f6,#6366f1)] text-white shadow-[0_0_20px_rgba(59,130,246,0.45)] ring-2 ring-blue-200/40"
+                      : "bg-blue-100/10 text-blue-50/65 ring-1 ring-blue-100/10",
                   )}
                 >
                   {digitBuffer || channel.id}
                 </span>
-                <h2 className="text-xs md:text-base font-bold text-white truncate">{channel.name}</h2>
+                <h2 className="truncate font-bold text-white text-xs tracking-[0.01em] md:text-base">{channel.name}</h2>
                 {channel.groups.length > 0 && (
                   <>
-                    <span className="text-xs md:text-sm text-white/50 hidden sm:inline">·</span>
-                    <div className="text-xs md:text-sm text-white/70 truncate hidden sm:block">
+                    <span className="hidden text-blue-100/35 text-xs sm:inline md:text-sm">·</span>
+                    <div className="hidden truncate text-blue-50/65 text-xs sm:block md:text-sm">
                       {channel.groups.join(" / ")}
                     </div>
                   </>
@@ -1507,24 +1625,69 @@ export function VideoPlayer({
       {needsUserInteraction && (
         <button
           type="button"
-          className="absolute inset-0 z-10 flex cursor-pointer items-center justify-center bg-black/80 p-4 transition-opacity hover:bg-black/85 border-none"
+          className="absolute inset-0 z-10 flex cursor-pointer items-center justify-center border-none bg-[radial-gradient(circle_at_center,rgba(18,50,91,0.78),rgba(2,6,23,0.94)_68%)] p-4 transition-[filter,background-color] backdrop-blur-[2px] hover:brightness-110"
           onClick={handleUserInteraction}
         >
           <div className="flex flex-col items-center gap-4 text-white">
-            <Play className="h-20 w-20 opacity-90 fill-current" />
-            <div className="text-center">
-              <div className="mb-2 text-2xl font-semibold">{t("clickToPlay")}</div>
-              <div className="text-sm text-white/70">{t("autoplayBlocked")}</div>
+            <Play className="h-20 w-20 fill-blue-100/20 text-blue-100 opacity-95 drop-shadow-[0_0_24px_rgba(59,130,246,0.55)]" />
+            <div className="max-w-lg px-2 text-center">
+              <div className="mb-2 font-semibold text-2xl tracking-tight text-blue-50">{t("clickToPlay")}</div>
+              <div className="text-pretty text-blue-50/65 text-sm leading-5">{t("autoplayBlocked")}</div>
             </div>
           </div>
         </button>
       )}
 
       {error && (
-        <div className="absolute inset-0 z-10 flex items-center justify-center bg-black/90 p-4">
-          <div className="max-w-md rounded-lg bg-red-500/20 p-4 text-white">
-            <div className="mb-2 text-lg font-semibold">{t("playbackError")}</div>
-            <div className="text-sm">{error}</div>
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-[radial-gradient(circle_at_center,rgba(76,20,55,0.46),rgba(2,6,23,0.96)_72%)] p-3 backdrop-blur-[3px] md:p-4">
+          <div
+            className={clsx(
+              PLAYER_OVERLAY_SURFACE_CLASS,
+              "max-h-full w-full max-w-xl overflow-y-auto rounded-2xl border-rose-300/25 bg-[linear-gradient(145deg,rgba(52,18,50,0.82),rgba(12,22,51,0.8))] p-4 text-white shadow-[0_20px_60px_rgba(43,5,32,0.58)] [@media(max-height:360px)]:p-2.5 md:p-5",
+            )}
+          >
+            <div className="flex items-center gap-2 font-semibold text-lg text-rose-100">
+              <CircleAlert className="h-5 w-5 shrink-0" aria-hidden="true" />
+              {t("playbackError")}
+            </div>
+            <div className="mt-2 break-words font-medium text-pretty text-rose-50 text-sm leading-relaxed">
+              {error.message}
+            </div>
+            {error.description && (
+              <div className="mt-1 break-words text-pretty text-rose-50/70 text-xs leading-relaxed [@media(max-height:360px)]:hidden md:text-sm">
+                {error.description}
+              </div>
+            )}
+            {(error.statusCode !== undefined || error.requestUrl) && (
+              <div className="mt-3 grid gap-2 text-xs [@media(max-height:360px)]:mt-2 [@media(max-height:360px)]:gap-1 md:text-sm">
+                {error.statusCode !== undefined && (
+                  <div className="grid grid-cols-[auto_1fr] items-baseline gap-3 rounded-lg bg-black/20 px-3 py-2 [@media(max-height:360px)]:py-1.5">
+                    <span className="text-rose-100/55">{t("httpStatus")}</span>
+                    <span className="min-w-0 font-mono text-rose-50">
+                      {error.statusCode}
+                      {error.statusText ? ` ${error.statusText}` : ""}
+                    </span>
+                  </div>
+                )}
+                {error.requestUrl && (
+                  <div className="rounded-lg bg-black/20 px-3 py-2 [@media(max-height:360px)]:grid [@media(max-height:360px)]:grid-cols-[auto_1fr] [@media(max-height:360px)]:items-baseline [@media(max-height:360px)]:gap-3 [@media(max-height:360px)]:py-1.5">
+                    <div className="mb-1 text-rose-100/55 [@media(max-height:360px)]:mb-0">{t("requestUrl")}</div>
+                    <div
+                      className="min-w-0 whitespace-normal break-all font-mono text-rose-50"
+                      title={error.requestUrl}
+                    >
+                      {error.requestUrl}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+            {error.suggestion && (
+              <div className="mt-3 rounded-lg border border-amber-200/15 bg-amber-100/8 px-3 py-2 text-xs leading-relaxed [@media(max-height:360px)]:mt-2 [@media(max-height:360px)]:py-1 md:text-sm">
+                <div className="font-medium text-amber-100">{t("suggestedAction")}</div>
+                <div className="mt-0.5 text-amber-50/70">{error.suggestion}</div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1534,7 +1697,9 @@ export function VideoPlayer({
           role="toolbar"
           className={clsx(
             "absolute bottom-0 left-0 right-0 z-10 transition-opacity duration-300",
-            showControls ? "opacity-100" : "opacity-0 has-focus-visible:opacity-100",
+            showControls
+              ? "opacity-100"
+              : "opacity-0 pointer-events-none has-focus-visible:opacity-100 has-focus-visible:pointer-events-auto",
           )}
           onMouseEnter={showControlsImmediately}
         >
@@ -1545,6 +1710,9 @@ export function VideoPlayer({
             isLive={isLive}
             onSeek={handleSeek}
             locale={locale}
+            mediaInfo={slotMediaInfo[visibleSlotId]}
+            renderState={slotRenderStates[visibleSlotId]}
+            autoDeinterlace={autoDeinterlace}
             seekStartTime={streamStartTime}
             isPlaying={isPlaying}
             onPlayPause={togglePlayPause}
@@ -1567,10 +1735,10 @@ export function VideoPlayer({
   );
 
   return (
-    <div className="relative w-full bg-black md:h-full pt-[env(safe-area-inset-top)]">
+    <div className="relative w-full bg-[radial-gradient(circle_at_50%_20%,#102044_0%,#050b18_52%,#01030a_100%)] pt-[env(safe-area-inset-top)] md:h-full">
       <div ref={playerDockRef} className="contents">
         {isDocumentPiP && (
-          <div className="@container-size/video relative flex aspect-video w-full min-h-0 items-center justify-center bg-black px-4 text-center text-sm font-medium text-white/70 md:aspect-auto md:h-full md:text-base">
+          <div className="@container-size/video relative flex aspect-video w-full min-h-0 items-center justify-center bg-[radial-gradient(circle_at_center,#102044_0%,#050b18_62%,#01030a_100%)] px-4 text-center font-medium text-blue-50/65 text-sm md:aspect-auto md:h-full md:text-base">
             {t("playingInPictureInPicture")}
           </div>
         )}

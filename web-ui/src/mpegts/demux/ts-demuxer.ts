@@ -401,6 +401,7 @@ class TSDemuxer {
     }
 
     if (this.isAudioPid(pid)) {
+      this.flushMediaBeforeTrackDiscontinuity();
       this.resetAudioParserState();
       Log.w(this.TAG, `Audio TS discontinuity on pid ${pid}: ${reason}; resetting audio parser state`);
       this.onTrackDiscontinuity?.("audio");
@@ -1257,6 +1258,10 @@ class TSDemuxer {
     meta.chromaFormat = details.chroma_format;
     meta.sarRatio = sar_ratio;
     meta.frameRate = frame_rate;
+    meta.colourPrimaries = details.colour_primaries;
+    meta.transferCharacteristics = details.transfer_characteristics;
+    meta.matrixCoefficients = details.matrix_coefficients;
+    meta.videoFullRange = details.video_full_range_flag;
 
     const fps_den = frame_rate.fps_den as number;
     const fps_num = frame_rate.fps_num as number;
@@ -1312,7 +1317,7 @@ class TSDemuxer {
     }
     if (this.isInitSegmentDispatched()) {
       if (this.video_track_.length) {
-        this.onDataAvailable?.(null, this.video_track_);
+        this.onDataAvailable?.(null, this.video_track_, true);
       }
     }
   }
@@ -1323,7 +1328,7 @@ class TSDemuxer {
     }
     if (this.isInitSegmentDispatched()) {
       if (this.audio_track_.length) {
-        this.onDataAvailable?.(this.audio_track_, null);
+        this.onDataAvailable?.(this.audio_track_, null, true);
       }
     }
   }
@@ -2124,6 +2129,7 @@ class TSDemuxer {
         channelCount: channelCount,
         codec: "mp4a.40.2",
         originalCodec: "mp4a.40.2",
+        sourceCodec: this.soft_decode_audio_codec_,
         config: [(2 << 3) | ((freqIdx & 0x0f) >>> 1), ((freqIdx & 0x01) << 7) | ((channelCount & 0x0f) << 3)],
         refSampleDuration: (1024 / sampleRate) * 1000,
         silentAudioMode: true,

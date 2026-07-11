@@ -46,6 +46,9 @@ export function markPlaybackUnlocked(): void {
  *  Also bounds how long a ratio change takes to reach the speakers, so it is
  *  kept small (rate changes during live-sync catch-up respond within this). */
 const SCHEDULE_AHEAD = 0.6;
+/** Schedule-ahead while the page is hidden: background timer throttling (1s on
+ *  mobile, up to 1/min on Chrome) would underrun the small foreground window. */
+const BACKGROUND_SCHEDULE_AHEAD = 4.0;
 /** Delay before the first chunk when (re)starting the scheduling chain. */
 const CHAIN_RESTART_DELAY = 0.04;
 /** Drift beyond this is treated as an emergency discontinuity and rebuilt from buffer. */
@@ -59,6 +62,11 @@ const RATIO_DRIFT_GAIN = 0.5;
 /** Max stretch ratio deviation used for drift correction. WSOLA preserves
  *  pitch, so a transient 10% tempo offset is inaudible while it converges. */
 const RATIO_DRIFT_MAX = 0.1;
+/** At normal playback speed, let an already-synchronized chain free-run
+ *  inside this deadband so WSOLA can use its ratio=1 memcpy bypass. Enter at
+ *  half the limit and exit at the full limit to avoid toggling at the edge. */
+const WSOLA_BYPASS_ENTER_DRIFT = 0.01;
+const WSOLA_BYPASS_EXIT_DRIFT = 0.02;
 /** Initial/large-drift mode: allow stronger WSOLA correction before falling back to hard resync. */
 const SOFT_SYNC_WINDOW_SEC = 3.0;
 const SOFT_SYNC_EXIT_DRIFT = 0.08;
@@ -74,6 +82,23 @@ const MAX_PENDING_CHUNKS = 600;
 const PENDING_REFILL_WINDOW_SEC = 2.0;
 /** Control ticks between verbose drift diagnostics (~10s). */
 const DRIFT_LOG_TICKS = 40;
+/** RECOVERING must anchor within this window or escalate via onResyncFailed. */
+const RECOVERY_TIMEOUT_MS = 4000;
+
+/**
+ * Lifecycle-driven sync state. The drift control loop and hard resync only run
+ * in ACTIVE — while the page is hidden or the media pipeline is being rebuilt,
+ * video.currentTime is not a trustworthy clock and correcting against it would
+ * replay/skip audio (e.g. the 1.5s hard-resync loop against a frozen video
+ * clock after returning from background on iOS).
+ *
+ *  - ACTIVE:     foreground, video clock trusted; full drift control.
+ *  - BACKGROUND: page hidden; audio free-runs, no drift correction.
+ *  - RECOVERING: waiting for proof that the video clock is live again (first
+ *    timeupdate while visible, or seeked); then one deterministic resync.
+ */
+type SyncState = "active" | "background" | "recovering";
+type ControlTickResult = "skipped" | "updated" | "pumped";
 
 interface AudioChunk {
   samples: Float32Array;
@@ -130,11 +155,17 @@ export class PCMAudioPlayer {
   private driftEma = 0;
   private hasDriftEma = false;
   private softSyncUntil = 0;
+  private wsolaBypassActive = false;
   private driftLogCounter = 0;
   private controlTimer: ReturnType<typeof setInterval> | null = null;
 
   private isBuffering: boolean = false;
   private isSeeking: boolean = false;
+
+  // Lifecycle-driven sync state (see SyncState docs)
+  private syncState: SyncState = "active";
+  private recoveryTimer: ReturnType<typeof setTimeout> | null = null;
+  private boundOnVisibilityChange: (() => void) | null = null;
 
   // Bound event handlers for cleanup
   private boundOnVideoSeeking: (() => void) | null = null;
@@ -158,6 +189,11 @@ export class PCMAudioPlayer {
   // audio silently never starts. Retry resume() from the next real gesture too.
   private gestureUnlockAttached = false;
   private boundTryGestureResume: (() => void) | null = null;
+
+  /** Called when a post-background/interruption resync could not be completed
+   *  (video clock never came back, or the target left the audio buffer) —
+   *  the stream needs to be rebuilt by the app layer. */
+  onResyncFailed: (() => void) | null = null;
 
   constructor(config: PlayerConfig) {
     this.config = config;
@@ -194,12 +230,49 @@ export class PCMAudioPlayer {
     this.updateGain();
 
     this.context.onstatechange = () => {
-      Log.v(TAG, `AudioContext state changed to: ${this.context?.state}`);
-      if (this.context?.state === "running") {
-        this.detachGestureUnlock();
-        if (this.canScheduleAudio()) {
-          this.resyncFromBuffer(this.videoElement?.currentTime ?? 0);
-        }
+      const state = this.context?.state as string | undefined;
+      Log.v(TAG, `AudioContext state changed to: ${state}`);
+
+      if (state === "interrupted") {
+        // WebKit-only: the OS revoked the audio session (backgrounding, but
+        // also e.g. an incoming call while the tab stays visible — no
+        // visibilitychange in that case). Unambiguous background signal on
+        // its own, independent of visibilitychange ordering.
+        this.cancelChain();
+        this.pendingChunks = [];
+        this.inputCursor = null;
+        this.resetDriftState();
+        this.setSyncState("background");
+        return;
+      }
+
+      if (state !== "running") {
+        // "suspended": either the pre-first-activation autoplay gate or our
+        // own deliberate suspend() in pause() — neither implies backgrounding,
+        // so syncState is left untouched. Drop the chain so resume doesn't
+        // burst out stale audio.
+        this.cancelChain();
+        this.pendingChunks = [];
+        this.inputCursor = null;
+        this.resetDriftState();
+        return;
+      }
+
+      // state === "running"
+      playbackUnlocked = true;
+      this.detachGestureUnlock();
+      if (this.syncState === "background") {
+        // Confirmed a real background period happened (via "interrupted"
+        // above, and/or visibilitychange->hidden already set this). Only
+        // anchor once the page is visible too — video.currentTime is not
+        // proven yet while the media pipeline may still be rebuilding.
+        this.setSyncState(document.visibilityState === "hidden" ? "background" : "recovering");
+        this.pump();
+      } else if (this.canScheduleAudio()) {
+        // First activation (autoplay gate lifting) or resume from our own
+        // pause() — the video clock was never untrusted; anchor immediately,
+        // same as before the sync state machine existed.
+        this.resyncFromBuffer(this.videoElement?.currentTime ?? 0);
       }
     };
 
@@ -248,8 +321,13 @@ export class PCMAudioPlayer {
       this.setMuted(video.muted);
     };
     this.boundOnTimeUpdate = () => {
-      this.controlTick();
-      this.pump();
+      // timeupdate only fires when currentTime actually advanced — while
+      // visible, it is the proof that the video pipeline is alive again.
+      if (this.syncState === "recovering" && document.visibilityState !== "hidden") {
+        this.completeRecovery("timeupdate");
+        return;
+      }
+      this.controlAndPump();
     };
     this.boundOnRateChange = () => {
       // Apply the new rate to the stretcher immediately instead of waiting for
@@ -257,7 +335,7 @@ export class PCMAudioPlayer {
       // mismatch (scheduled-ahead audio at the old rate) is absorbed by the
       // drift correction, so moderate rate changes (live sync 1 ↔ 1.2) cause
       // no audible interruption.
-      this.controlTick();
+      this.controlAndPump(false);
     };
     this.boundOnVideoWaiting = () => this.enterBuffering("waiting");
     this.boundOnVideoStalled = () => {
@@ -280,9 +358,14 @@ export class PCMAudioPlayer {
     video.addEventListener("playing", this.boundOnVideoPlaying);
     video.addEventListener("canplay", this.boundOnVideoCanPlay);
 
+    this.boundOnVisibilityChange = this.onVisibilityChange.bind(this);
+    document.addEventListener("visibilitychange", this.boundOnVisibilityChange);
+    if (document.visibilityState === "hidden") {
+      this.setSyncState("background");
+    }
+
     this.controlTimer = setInterval(() => {
-      this.controlTick();
-      this.pump();
+      this.controlAndPump();
     }, CONTROL_INTERVAL_MS);
   }
 
@@ -290,6 +373,14 @@ export class PCMAudioPlayer {
     if (this.controlTimer) {
       clearInterval(this.controlTimer);
       this.controlTimer = null;
+    }
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
+    if (this.boundOnVisibilityChange) {
+      document.removeEventListener("visibilitychange", this.boundOnVisibilityChange);
+      this.boundOnVisibilityChange = null;
     }
     if (this.videoElement) {
       if (this.boundOnVideoSeeking) this.videoElement.removeEventListener("seeking", this.boundOnVideoSeeking);
@@ -402,11 +493,15 @@ export class PCMAudioPlayer {
       return;
     }
 
-    if (ctx.state === "suspended") {
+    if (ctx.state !== "running") {
+      // "suspended" may just be autoplay policy — try to resume. WebKit's
+      // "interrupted" (iOS background) also lands here: resume() is a no-op
+      // until the system ends the interruption, and nothing must be scheduled
+      // on the frozen clock meanwhile.
       void ctx
         .resume()
         .then(() => {
-          if (ctx.state === "running") {
+          if ((ctx.state as string) === "running") {
             playbackUnlocked = true;
             this.pump();
           } else if (!playbackUnlocked) {
@@ -423,14 +518,22 @@ export class PCMAudioPlayer {
 
     while (true) {
       if (this.pendingChunks.length === 0) {
+        // RECOVERING with no running chain: the only refill anchor available
+        // is video.currentTime, which is exactly the clock we do not trust
+        // yet — hold off until completeRecovery() anchors deterministically.
+        if (this.syncState === "recovering" && this.inputCursor === null) {
+          break;
+        }
         this.refillPendingFromBuffer(this.inputCursor ?? this.videoElement?.currentTime ?? 0);
       }
       if (this.pendingChunks.length === 0) {
         break;
       }
 
-      // Throttle: keep at most SCHEDULE_AHEAD seconds scheduled ahead
-      if (this.nextStartTime - ctx.currentTime >= SCHEDULE_AHEAD) {
+      // Throttle: keep at most the schedule-ahead window scheduled. Hidden
+      // pages get a larger window to ride out background timer throttling.
+      const scheduleAhead = this.syncState === "background" ? BACKGROUND_SCHEDULE_AHEAD : SCHEDULE_AHEAD;
+      if (this.nextStartTime - ctx.currentTime >= scheduleAhead) {
         break;
       }
 
@@ -479,6 +582,87 @@ export class PCMAudioPlayer {
     this.videoElement?.pause();
   }
 
+  // ==================== Sync state machine ====================
+
+  private setSyncState(next: SyncState): void {
+    if (this.syncState === next) {
+      return;
+    }
+    Log.v(TAG, `Sync state: ${this.syncState} -> ${next}`);
+    this.syncState = next;
+
+    if (this.recoveryTimer) {
+      clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
+    if (next === "recovering") {
+      // Failure exit: the anchor event never arrives when the media pipeline
+      // died in background (decoder rebuild failed, buffer gone). One-shot,
+      // bound to this state — cleared on any transition out.
+      this.recoveryTimer = setTimeout(() => {
+        this.recoveryTimer = null;
+        this.onRecoveryTimeout();
+      }, RECOVERY_TIMEOUT_MS);
+    }
+  }
+
+  private onVisibilityChange(): void {
+    if (document.visibilityState === "hidden") {
+      // Video decode is about to be suspended; its clock is no longer a sync
+      // reference. Audio free-runs (Control Center playback keeps it alive).
+      this.setSyncState("background");
+    } else {
+      // Pipeline rebuild starts now; wait for proof (timeupdate) before anchoring.
+      this.setSyncState("recovering");
+    }
+  }
+
+  /** Anchor point: video.currentTime is authoritative again. */
+  private completeRecovery(reason: string): void {
+    const video = this.videoElement;
+    this.setSyncState("active");
+    if (!video) {
+      return;
+    }
+
+    // Chain survived (e.g. Android: AudioContext keeps running in background)
+    // and is already close — keep it and let drift control absorb the rest,
+    // instead of an audible rebuild on every tab switch.
+    const audioTime = this.audioStreamTimeNow();
+    if (audioTime !== null && Math.abs(audioTime - video.currentTime) < HARD_RESYNC_THRESHOLD) {
+      Log.v(TAG, `Recovery (${reason}): chain intact, drift ${(audioTime - video.currentTime).toFixed(3)}s`);
+      this.resetDriftState();
+      this.softSyncUntil = (this.context?.currentTime ?? 0) + SOFT_SYNC_WINDOW_SEC;
+      return;
+    }
+
+    Log.v(TAG, `Recovery anchor (${reason}) at ${video.currentTime.toFixed(3)}s`);
+    // Re-enter soft-sync so residual drift converges fast (±35%) instead of
+    // lingering at the steady-state ±10% cap for many seconds.
+    this.softSyncUntil = (this.context?.currentTime ?? 0) + SOFT_SYNC_WINDOW_SEC;
+    const anchored = this.resyncFromBuffer(video.currentTime);
+    if (!anchored && this.audioBuffer.length > 0) {
+      // Buffer exists but no longer covers the video position: the two sides
+      // diverged past repair (e.g. long background stay). Rebuild the stream.
+      Log.w(TAG, "Recovery target left the audio buffer; escalating");
+      this.onResyncFailed?.();
+    }
+    // Empty buffer: stream data simply hasn't arrived yet — pump will anchor
+    // on the first fed chunk; not a failure.
+  }
+
+  private onRecoveryTimeout(): void {
+    const video = this.videoElement;
+    // Only escalate when playback is genuinely expected to progress: a paused
+    // or seeking video legitimately produces no timeupdate — keep waiting for
+    // its play/seeked to anchor instead.
+    if (!video || video.paused || video.seeking || this.isSeeking || document.visibilityState === "hidden") {
+      return;
+    }
+    Log.w(TAG, `No video progress within ${RECOVERY_TIMEOUT_MS}ms of recovery; escalating`);
+    this.onResyncFailed?.();
+  }
+
   // ==================== Media readiness ====================
 
   private hasPlayableVideoData(): boolean {
@@ -499,6 +683,7 @@ export class PCMAudioPlayer {
   private resetDriftState(): void {
     this.driftEma = 0;
     this.hasDriftEma = false;
+    this.wsolaBypassActive = false;
   }
 
   private enterBuffering(reason: "waiting" | "stalled"): void {
@@ -528,6 +713,12 @@ export class PCMAudioPlayer {
     }
 
     this.isBuffering = false;
+    if (this.syncState !== "active") {
+      // Video clock not trusted yet; the state machine anchors on its own
+      // events (recovery timeupdate / background free-run via pump).
+      this.pump();
+      return;
+    }
     Log.v(TAG, "Video playback resumed; resyncing PCM audio");
     this.resyncFromBuffer(video.currentTime);
   }
@@ -569,7 +760,10 @@ export class PCMAudioPlayer {
     if (this.nextStartTime < ctxNow + 0.005) {
       // Chain (re)start: if the audio about to play is ahead of the video
       // clock, delay the chain start so it lines up instead of drifting.
-      const lead = this.videoElement ? this.outputStreamCursor - this.videoElement.currentTime : 0;
+      // Outside ACTIVE the video clock is not a reference — start immediately
+      // and let the recovery anchor fix alignment.
+      const lead =
+        this.syncState === "active" && this.videoElement ? this.outputStreamCursor - this.videoElement.currentTime : 0;
       this.nextStartTime = ctxNow + Math.max(CHAIN_RESTART_DELAY, Math.min(lead, 2));
       chainRestart = true;
     }
@@ -671,11 +865,28 @@ export class PCMAudioPlayer {
 
   // ==================== Drift control ====================
 
-  private controlTick(): void {
+  /** Run drift control and then keep the scheduling window filled exactly
+   *  once. A successful resync pumps internally, so do not repeat it.
+   *  Ratechange passes false to preserve its old no-op behavior when drift
+   *  control is not currently applicable. */
+  private controlAndPump(pumpWhenSkipped = true): void {
+    const result = this.controlTick();
+    if (result === "updated" || (result === "skipped" && pumpWhenSkipped)) {
+      this.pump();
+    }
+  }
+
+  private controlTick(): ControlTickResult {
     const ctx = this.context;
     const video = this.videoElement;
-    if (!ctx || !video || ctx.state !== "running" || !this.canScheduleAudio() || !this.stretcher) {
-      return;
+    if (!ctx || !video || ctx.state !== "running" || !this.stretcher) {
+      return "skipped";
+    }
+    // Drift control and hard resync are meaningful only when the video clock
+    // is trusted. BACKGROUND/RECOVERING free-run: correcting against a frozen
+    // or rebuilding video clock replays audio (the "broken record" loop).
+    if (this.syncState !== "active" || !this.canScheduleAudio()) {
+      return "skipped";
     }
 
     const audioTime = this.audioStreamTimeNow();
@@ -686,10 +897,10 @@ export class PCMAudioPlayer {
         const target = video.currentTime;
         const idx = this.findChunkIndexByTime(target);
         if (idx >= 0 && this.audioBuffer[this.audioBuffer.length - 1].endTime > target + 0.1) {
-          this.resyncFromBuffer(target);
+          return this.resyncFromBuffer(target) ? "pumped" : "skipped";
         }
       }
-      return;
+      return "skipped";
     }
 
     const drift = audioTime - video.currentTime;
@@ -702,8 +913,7 @@ export class PCMAudioPlayer {
 
     if (Math.abs(drift) > HARD_RESYNC_THRESHOLD) {
       Log.v(TAG, `Emergency hard resync: drift=${drift.toFixed(3)}s`);
-      this.resyncFromBuffer(video.currentTime);
-      return;
+      return this.resyncFromBuffer(video.currentTime) ? "pumped" : "skipped";
     }
 
     // Rate matching: follow video.playbackRate, correct residual drift.
@@ -714,17 +924,23 @@ export class PCMAudioPlayer {
     const correctionMax = softSyncActive ? SOFT_SYNC_RATIO_DRIFT_MAX : RATIO_DRIFT_MAX;
     const correctionGain = softSyncActive ? SOFT_SYNC_DRIFT_GAIN : RATIO_DRIFT_GAIN;
     const correction = Math.min(correctionMax, Math.max(-correctionMax, correctionDrift * correctionGain));
-    const ratio = Math.min(2, Math.max(0.5, rate * (1 - correction)));
+    const bypassDriftLimit = this.wsolaBypassActive ? WSOLA_BYPASS_EXIT_DRIFT : WSOLA_BYPASS_ENTER_DRIFT;
+    this.wsolaBypassActive =
+      video.playbackRate === 1 &&
+      !softSyncActive &&
+      Math.abs(drift) <= bypassDriftLimit &&
+      Math.abs(this.driftEma) <= bypassDriftLimit;
+    const ratio = this.wsolaBypassActive ? 1 : Math.min(2, Math.max(0.5, rate * (1 - correction)));
     this.stretcher.setRatio(ratio);
-    this.pump();
 
     if (++this.driftLogCounter >= DRIFT_LOG_TICKS) {
       this.driftLogCounter = 0;
       Log.v(
         TAG,
-        `A/V drift=${(this.driftEma * 1000).toFixed(1)}ms, rate=${rate}, stretch ratio=${ratio.toFixed(4)}, mode=${softSyncActive ? "soft" : "steady"}`,
+        `A/V drift=${(this.driftEma * 1000).toFixed(1)}ms, rate=${rate}, stretch ratio=${ratio.toFixed(4)}, mode=${this.wsolaBypassActive ? "bypass" : softSyncActive ? "soft" : "steady"}`,
       );
     }
+    return "updated";
   }
 
   // ==================== Buffer Management ====================
@@ -827,15 +1043,23 @@ export class PCMAudioPlayer {
   }
 
   /** Remove buffered audio that is too far behind the current playback position.
-   *  Same strategy as MSE SourceBuffer cleanup: relative to currentTime. */
+   *  Same strategy as MSE SourceBuffer cleanup: relative to currentTime.
+   *  Outside ACTIVE, video.currentTime may be frozen (background free-run —
+   *  exactly the case motivating this state), so it must not be the fallback
+   *  reference: that would stop advancing and let the buffer grow unbounded.
+   *  Prefer the live audio playhead, then the newest buffered timestamp —
+   *  both keep advancing as data arrives even if every clock is stalled. */
   private cleanupBuffer(): void {
     if (this.audioBuffer.length === 0 || !this.videoElement) return;
 
-    const videoTime = this.videoElement.currentTime;
+    const referenceTime =
+      this.syncState === "active"
+        ? this.videoElement.currentTime
+        : (this.audioStreamTimeNow() ?? this.audioBuffer[this.audioBuffer.length - 1].endTime);
 
-    if (videoTime - this.audioBuffer[0].time < this.config.bufferCleanupMaxBackward) return;
+    if (referenceTime - this.audioBuffer[0].time < this.config.bufferCleanupMaxBackward) return;
 
-    const cutoff = videoTime - this.config.bufferCleanupMinBackward;
+    const cutoff = referenceTime - this.config.bufferCleanupMinBackward;
     let removeCount = 0;
     for (let i = 0; i < this.audioBuffer.length; i++) {
       if (this.audioBuffer[i].endTime < cutoff) {
@@ -875,8 +1099,9 @@ export class PCMAudioPlayer {
   /**
    * Rebuild the scheduling chain from the seek buffer at a target position
    * (used for seeks, resume after pause/suspend, and hard resyncs).
+   * Returns false when the target is not covered by the buffer.
    */
-  private resyncFromBuffer(targetTime: number): void {
+  private resyncFromBuffer(targetTime: number): boolean {
     this.cancelChain(true);
     this.pendingChunks = [];
     this.inputCursor = null;
@@ -885,12 +1110,23 @@ export class PCMAudioPlayer {
     const startIndex = this.findChunkIndexByTime(targetTime);
     if (startIndex < 0) {
       Log.v(TAG, "Resync target not in buffer, waiting for new data");
-      return;
+      return false;
     }
 
     this.refillPendingFromBuffer(targetTime);
+    if (this.pendingChunks.length === 0) {
+      // findChunkIndexByTime clamps to the nearest chunk instead of returning
+      // -1 for a target before/after all buffered data (e.g. the video clock
+      // moved outside the retained window during a long background stay), so
+      // startIndex >= 0 above does not guarantee targetTime is covered. Treat
+      // "nothing to schedule" the same as "not in buffer" so callers (notably
+      // completeRecovery) escalate instead of silently leaving audio muted.
+      Log.v(TAG, "Resync target not covered by buffer, waiting for new data");
+      return false;
+    }
     Log.v(TAG, `Resync at ${targetTime.toFixed(3)}s, refilled ${this.pendingChunks.length} chunks`);
     this.pump();
+    return true;
   }
 
   private onVideoSeeking(): void {
@@ -906,23 +1142,27 @@ export class PCMAudioPlayer {
 
     Log.v(TAG, `Video seeked to ${targetTime.toFixed(3)}, resyncing audio`);
     this.isSeeking = false;
+    // A completed seek makes video.currentTime authoritative in any state.
+    if (this.syncState === "recovering") {
+      this.setSyncState(document.visibilityState === "hidden" ? "background" : "active");
+    }
     this.resyncFromBuffer(targetTime);
   }
 
   // ==================== Playback Control ====================
 
   async play(): Promise<void> {
-    if (this.context?.state === "suspended") {
+    if (this.context && this.context.state !== "running") {
       try {
         await this.context.resume();
         playbackUnlocked = true;
-        // onstatechange → resyncFromBuffer
+        // onstatechange drives the rest (background free-run or recovery anchor)
       } catch (_e) {
         Log.w(TAG, "Failed to resume AudioContext on play()");
       }
     } else {
       const video = this.videoElement;
-      if (video && this.canScheduleAudio()) {
+      if (video && this.syncState === "active" && this.canScheduleAudio()) {
         this.resyncFromBuffer(video.currentTime);
       }
     }
@@ -964,6 +1204,7 @@ export class PCMAudioPlayer {
     this.stretcherFailed = false;
     this.softSyncUntil = 0;
     this.resetDriftState();
+    this.setSyncState(document.visibilityState === "hidden" ? "background" : "active");
   }
 
   setVolume(volume: number): void {
