@@ -1,4 +1,4 @@
-# <img src="./web-ui/public/assets/icon.png" width="24" height="24"> rtp2httpd - IPTV Streaming Gateway
+# <img src="./web-ui/public/assets/icon-192.png" width="24" height="24"> rtp2httpd - IPTV Streaming Gateway
 
 [>> Official Documentation <<](https://rtp2httpd.com)
 

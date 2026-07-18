@@ -35,6 +35,7 @@ export function setupLiveSync(
   video: HTMLMediaElement,
   config: PlayerConfig,
   getLiveEdgeLatency: () => number | null,
+  canAdjustPlaybackRate: () => boolean = () => true,
 ): () => void {
   if (config.liveSync) {
     Log.v(
@@ -54,6 +55,7 @@ export function setupLiveSync(
 
   function onTimeUpdate(): void {
     if (!config.liveSync) return;
+    if (!canAdjustPlaybackRate()) return;
 
     const latency = getLiveEdgeLatency();
     if (latency === null) return;
@@ -87,6 +89,7 @@ export function setupLiveSync(
 
   function onWaiting(): void {
     if (!config.liveSync) return;
+    if (!canAdjustPlaybackRate()) return;
 
     // Seek/Go Live often fires waiting while data is still buffered ahead — not an underrun.
     if (video.seeking) return;

@@ -29,7 +29,7 @@ features:
     details: RTP 乱序恢复、Reed-Solomon FEC 前向纠错，消除网络抖动花屏
   - icon: 🎬
     title: 内置播放器
-    details: 现代化 Web 播放器，支持 EPG 和时移回看，桌面/移动端自适应
+    details: 现代化 Web 播放器，支持 EPG、时移回看、画质增强，桌面/移动端自适应
   - icon: 📷
     title: 频道快照
     details: 通过 HTTP 获取频道实时截图，可作为播放器频道预览图
@@ -54,7 +54,7 @@ features:
         <h3>快速换台 + 时移回看</h3>
       </header>
       <div class="demo-card__media">
-        <video controls muted playsinline preload="metadata" src="https://github.com/user-attachments/assets/ca1a332f-d6e7-4a1e-be88-92bef67758b3"></video>
+        <video controls muted preload="metadata" src="https://github.com/user-attachments/assets/ca1a332f-d6e7-4a1e-be88-92bef67758b3"></video>
       </div>
       <aside class="demo-callout">
         <span class="demo-callout__label">提示</span>
@@ -68,7 +68,7 @@ features:
         <h3>内置 Web 播放器</h3>
       </header>
       <div class="demo-card__media">
-        <video controls muted playsinline preload="metadata" src="https://github.com/user-attachments/assets/efa2124b-329e-4ab0-a01d-81ee6f8998c4"></video>
+        <video controls muted preload="metadata" src="https://github.com/user-attachments/assets/d3dab0c0-03c4-453b-86ae-85406e5208eb"></video>
       </div>
       <aside class="demo-callout">
         <span class="demo-callout__label">提示</span>
@@ -91,7 +91,7 @@ features:
         <h3>25 条 1080p 组播流同时播放</h3>
       </header>
       <div class="demo-card__media">
-        <video controls muted playsinline preload="metadata" src="https://github.com/user-attachments/assets/9d531ab6-6c35-4c50-802a-71f88b6b22c5"></video>
+        <video controls muted preload="metadata" src="https://github.com/user-attachments/assets/9d531ab6-6c35-4c50-802a-71f88b6b22c5"></video>
       </div>
       <aside class="demo-callout">
         <span class="demo-callout__label">性能</span>

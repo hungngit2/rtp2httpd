@@ -1052,6 +1052,22 @@ int connection_route_and_start(connection_t *c) {
     c->should_set_r2h_cookie = (source == TOKEN_SOURCE_QUERY);
   }
 
+  /* Web app manifests are static, non-sensitive PWA install metadata -- not
+   * gated by Basic Auth, same treatment as /assets/. */
+  const char *status_manifest_route = "status.webmanifest";
+  size_t status_manifest_route_len = strlen(status_manifest_route);
+  if (status_manifest_route_len == path_len && strncmp(service_path, status_manifest_route, path_len) == 0) {
+    handle_web_app_manifest(c, false);
+    return 0;
+  }
+
+  const char *player_manifest_route = "player.webmanifest";
+  size_t player_manifest_route_len = strlen(player_manifest_route);
+  if (player_manifest_route_len == path_len && strncmp(service_path, player_manifest_route, path_len) == 0) {
+    handle_web_app_manifest(c, true);
+    return 0;
+  }
+
   /* HTTP Basic Auth for /status, /player, /setting (and their APIs/SSE),
    * enforced only for non-local clients. Independent of r2h-token -- both
    * may be configured and both must then pass. */

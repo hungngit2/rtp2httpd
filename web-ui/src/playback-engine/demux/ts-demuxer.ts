@@ -1,3 +1,4 @@
+import type { DemuxErrorDetail } from "../errors";
 import { IllegalStateException } from "../utils/exception";
 import Log from "../utils/logger";
 import { AACADTSParser, type AACFrame, AACLOASParser, AudioSpecificConfig, type LOASAACFrame } from "./aac";
@@ -110,10 +111,12 @@ type AudioData =
 const VIDEO_PID_KEYS: readonly CommonPidKey[] = ["h264", "h265"];
 const AUDIO_PID_KEYS: readonly CommonPidKey[] = ["adts_aac", "loas_aac", "ac3", "eac3", "mp3"];
 
-export type OnErrorCallback = (type: string, info: string) => void;
+export type OnErrorCallback = (type: DemuxErrorDetail, info: string) => void;
 export type OnTrackMetadataCallback = (type: string, metadata: unknown) => void;
 export type OnDataAvailableCallback = (audioTrack: unknown, videoTrack: unknown, force?: boolean) => void;
 export type OnTrackDiscontinuityCallback = (track: "audio" | "video") => void;
+/** Reports the 90 kHz PCR base and byte position from the PMT-declared PCR PID. */
+export type OnPcrCallback = (pcrBase: number, bytePosition: number, discontinuity: boolean) => void;
 
 class TSDemuxer {
   private readonly TAG: string = "TSDemuxer";
@@ -122,6 +125,7 @@ class TSDemuxer {
   public onTrackMetadata: OnTrackMetadataCallback | null = null;
   public onDataAvailable: OnDataAvailableCallback | null = null;
   public onTrackDiscontinuity: OnTrackDiscontinuityCallback | null = null;
+  public onPcr: OnPcrCallback | null = null;
   /** Software audio decode support (MP2) */
   public onRawAudioData: ((frame: { codec: "mp2"; data: Uint8Array; pts: number }) => void) | null = null;
 
@@ -227,6 +231,7 @@ class TSDemuxer {
     this.onTrackMetadata = null;
     this.onDataAvailable = null;
     this.onTrackDiscontinuity = null;
+    this.onPcr = null;
     this.onRawAudioData = null;
     this.soft_decode_audio_codec_ = null;
   }
@@ -484,7 +489,10 @@ class TSDemuxer {
           const PCR_flag = (data[5] & 0x10) >>> 4;
           if (PCR_flag) {
             // track PCR base for pts/dts wraparound detection
-            this.getPcrBase(data);
+            const pcrBase = this.getPcrBase(data);
+            if (is_pcr_pid) {
+              this.onPcr?.(pcrBase, file_position, adaptation_field_info.discontinuity_indicator === 1);
+            }
           }
         }
         if (adaptation_field_control === 0x02 || 5 + adaptation_field_length === 188) {

@@ -33,6 +33,7 @@ endif()
 set(COMMON_SOURCES
   src/rtp2httpd.c
   src/supervisor.c
+  src/pid_file.c
   src/configuration.c
   src/access_log.c
   src/http.c
@@ -49,6 +50,7 @@ set(COMMON_SOURCES
   src/fcc_huawei.c
   src/stream.c
   src/rtsp.c
+  src/http_chunked_decoder.c
   src/http_proxy.c
   src/http_proxy_rewrite.c
   src/stun.c

@@ -31,6 +31,22 @@ curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/inst
 >
 > 若 rtp2httpd 部署在反向代理之后，必须同时启用 `xff = 1` 才能正确识别客户端真实 IP；否则本地网络豁免逻辑（及 `web-auth-require-local`）会将所有经代理转发的客户端一律视为本地，无论其真实来源如何。
 
+## 固件内置
+
+以下固件/平台已经内置 rtp2httpd（或者可以在应用市场、官方源直接下载安装 rtp2httpd）。
+
+> [!IMPORTANT]
+> 为了保证稳定性，通常内置/上架的 rtp2httpd 版本落后于官方最新版。如果你希望追新，建议使用其他方式来安装。
+
+- [飞牛 fnOS](https://www.fnnas.com)：应用中心已上架 rtp2httpd，与飞牛桌面、统一网关、FN Connect 深度集成
+- [iStoreOS](https://site.istoreos.com)：iStore 已上架 rtp2httpd
+- [爱快 iKuai](https://www.ikuai8.com)：应用市场已上架 rtp2httpd
+- [懒猫微服](https://lazycat.cloud)：应用商店已上架 rtp2httpd
+- [cooluc's OpenWrt](https://github.com/sbwml/builder)：已内置 rtp2httpd
+- [ImmortalWrt](https://github.com/immortalwrt/immortalwrt)：已加入官方源
+- [AutoBuildImmortalWrt](https://github.com/wukongdaily/AutoBuildImmortalWrt)：[store](https://github.com/wukongdaily/store) 已内置 rtp2httpd，轻松构建
+- [潘多拉 QWRT for K2P](https://www.right.com.cn/forum/forum.php?mod=viewthread&tid=8346913&fromuid=402348)：已内置 rtp2httpd
+
 ## 静态二进制文件部署
 
 从 [Releases](https://github.com/stackia/rtp2httpd/releases) 页面下载对应架构的静态二进制文件 `rtp2httpd-<版本号>-<架构>`，上传到设备并 `chmod +x` 后即可运行。
