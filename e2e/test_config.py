@@ -5,8 +5,6 @@ Tests cover command-line flags, config file sections, default values,
 and precedence rules.
 """
 
-import base64
-import json
 import time  # needed for TestMaxClients deadline loop
 
 import pytest
@@ -119,10 +117,8 @@ def _assert_app_path_prefix(port: int, expected_prefix: str):
     normalized = "/" + expected_prefix.strip("/")
     status, _, _ = http_get("127.0.0.1", port, f"{normalized}/status")
     assert status == 200
-    # app-path-prefix is an *additional* way to reach every route, not an
-    # exclusive gate -- the bare path stays reachable too.
     status2, _, _ = http_get("127.0.0.1", port, "/status")
-    assert status2 == 200
+    assert status2 == 404
 
 
 def _assert_hostname(port: int, expected_hosts: tuple[str, str]):
@@ -869,131 +865,3 @@ class TestQuietMode:
             assert status == 200
         finally:
             r2h.stop()
-
-
-def test_get_config_endpoint_reflects_running_config(r2h_binary):
-    port = find_free_port()
-    config = f"""\
-[global]
-verbosity = 3
-maxclients = 7
-hostname = example.test
-
-[bind]
-* {port}
-"""
-    r2h = R2HProcess(r2h_binary, port, config_content=config)
-    r2h.start()
-    try:
-        # hostname is configured above, so the request's Host header must match it
-        # (see the `hostname` config option's Host-header enforcement).
-        status, _, body = http_get("127.0.0.1", port, "/setting/api/get-config", headers={"Host": "example.test"})
-        assert status == 200
-        data = json.loads(body)
-        assert data["maxclients"] == 7
-        assert data["hostname"] == "example.test"
-        assert data["verbosity"] == 3
-        assert data["listen"] == [str(port)]
-    finally:
-        r2h.stop()
-
-
-def test_save_config_updates_file_and_reloads(r2h_binary):
-    port = find_free_port()
-    config = f"""\
-[global]
-verbosity = 2
-maxclients = 5
-
-[bind]
-* {port}
-
-[services]
-#EXTM3U
-#EXTINF:-1,Test
-rtp://239.0.0.1:1234
-"""
-    r2h = R2HProcess(r2h_binary, port, config_content=config)
-    r2h.start()
-    try:
-        status, _, body = http_request(
-            "127.0.0.1",
-            port,
-            "POST",
-            "/setting/api/save-config",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            body=b"maxclients=42&hostname=example.test",
-        )
-        assert status == 200
-        data = json.loads(body)
-        assert data["success"] is True
-
-        assert r2h._config_path is not None
-        with open(r2h._config_path) as f:
-            saved = f.read()
-        assert "maxclients = 42" in saved
-        assert "hostname = example.test" in saved
-        assert "#EXTINF:-1,Test" in saved  # [services] untouched
-        assert "rtp://239.0.0.1:1234" in saved
-    finally:
-        r2h.stop()
-
-
-def test_save_config_rejects_newline_injection(r2h_binary):
-    port = find_free_port()
-    config = f"[global]\nverbosity = 2\n\n[bind]\n* {port}\n"
-    r2h = R2HProcess(r2h_binary, port, config_content=config)
-    r2h.start()
-    try:
-        status, _, body = http_request(
-            "127.0.0.1",
-            port,
-            "POST",
-            "/setting/api/save-config",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            body=b"hostname=evil%0D%0Ar2h-token=hacked",
-        )
-        assert status == 400
-        data = json.loads(body)
-        assert data["success"] is False
-    finally:
-        r2h.stop()
-
-
-def test_web_auth_fields_round_trip(r2h_binary):
-    port = find_free_port()
-    config = f"""\
-[global]
-verbosity = 4
-
-[bind]
-* {port}
-"""
-    r2h = R2HProcess(r2h_binary, port, config_content=config)
-    try:
-        r2h.start()
-        status, _, body = http_request(
-            "127.0.0.1",
-            port,
-            "POST",
-            "/setting/api/save-config",
-            body=b"web-auth-user=admin&web-auth-password=secret&web-auth-require-local=1",
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        assert status == 200
-
-        # With web-auth-require-local=1, Basic Auth is required even for loopback clients
-        auth_token = base64.b64encode(b"admin:secret").decode()
-        status, _, body = http_get(
-            "127.0.0.1",
-            port,
-            "/setting/api/get-config",
-            headers={"Authorization": f"Basic {auth_token}"},
-        )
-        assert status == 200
-        data = json.loads(body)
-        assert data["web-auth-user"] == "admin"
-        assert data["web-auth-password"] == "secret"
-        assert data["web-auth-require-local"] is True
-    finally:
-        r2h.stop()

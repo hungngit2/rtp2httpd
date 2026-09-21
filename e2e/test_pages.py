@@ -3,7 +3,6 @@ E2E tests for built-in web pages (status, player) and the root
 playlist endpoint.
 """
 
-import base64
 import gzip
 import json
 import os
@@ -19,7 +18,6 @@ from helpers import (
     find_free_port,
     get_header,
     http_get,
-    http_request,
     stream_get,
     write_temp_file,
 )
@@ -264,38 +262,6 @@ app-path-prefix = ///app///
 
 
 # ---------------------------------------------------------------------------
-# Setting page
-# ---------------------------------------------------------------------------
-
-
-def test_setting_page_serves_html(basic_r2h):
-    status, headers, body = http_get("127.0.0.1", basic_r2h.port, "/setting")
-    assert status == 200
-    assert "text/html" in get_header(headers, "Content-Type")
-    assert b"<title>rtp2httpd Settings</title>" in body
-
-
-def test_setting_page_path_is_configurable(r2h_binary):
-    port = find_free_port()
-    config = f"""\
-[global]
-verbosity = 4
-setting-page-path = /admin
-
-[bind]
-* {port}
-"""
-    r2h = R2HProcess(r2h_binary, port, config_content=config)
-    r2h.start()
-    try:
-        _wait_for_http_status(port, "/admin", expected=200)
-        status, _, _ = http_get("127.0.0.1", port, "/setting")
-        assert status == 404
-    finally:
-        r2h.stop()
-
-
-# ---------------------------------------------------------------------------
 # Root / and /playlist.m3u
 # ---------------------------------------------------------------------------
 
@@ -441,33 +407,19 @@ class TestAppPathPrefix:
         if status == 200:
             assert "event-stream" in hdrs.get("content-type", "")
 
-    def test_boundary_mismatch_route_404s(self, prefixed_r2h):
-        """A path that merely looks like it could be a prefix (but doesn't
-        match app-path-prefix or any known route) is still a genuine 404."""
-        status, _, _ = http_get("127.0.0.1", prefixed_r2h.port, "/app/rtp2httpd2/status")
-        assert status == 404
-
-    @pytest.mark.parametrize("path", ["/status", "/player", "/assets/icon-192.png", "/playlist.m3u", "/epg.xml"])
-    def test_bare_paths_also_reachable_with_app_path_prefix_configured(self, prefixed_r2h, path):
-        """Every route -- pages, assets, and media/service routes alike -- stays
-        reachable at its bare path even when app-path-prefix is configured.
-        This matters especially for streams: other IPTV client apps and
-        existing playlists often have those URLs hardcoded without any
-        reverse-proxy prefix, and app-path-prefix is meant as an *additional*
-        way to reach everything, not an exclusive gate."""
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/status",
+            "/player",
+            "/assets/icon-192.png",
+            "/playlist.m3u",
+            "/app/rtp2httpd2/status",
+        ],
+    )
+    def test_unprefixed_or_boundary_mismatch_routes_404(self, prefixed_r2h, path):
         status, _, _ = http_get("127.0.0.1", prefixed_r2h.port, path)
-        assert status == 200
-
-    def test_stream_route_reachable_both_prefixed_and_bare(self, prefixed_r2h):
-        """A configured stream (rtp/) must be reachable both with and without
-        app-path-prefix, since some IPTV client apps hardcode bare stream URLs."""
-        status, _, _ = http_request("127.0.0.1", prefixed_r2h.port, "HEAD", "/rtp/239.0.0.1:1234", timeout=3.0)
-        assert status == 200
-
-        status, _, _ = http_request(
-            "127.0.0.1", prefixed_r2h.port, "HEAD", f"{APP_PREFIX}/rtp/239.0.0.1:1234", timeout=3.0
-        )
-        assert status == 200
+        assert status == 404
 
     def test_token_cookie_path_uses_app_prefix(self, r2h_binary):
         port = find_free_port()
@@ -583,175 +535,5 @@ r2h-token = new-token
             assert manifest["id"] == "/new/new-status"
             assert manifest["scope"] == "/new/new-status"
             assert manifest["start_url"] == "/new/new-status?r2h-token=new-token"
-        finally:
-            r2h.stop()
-
-
-class TestWebBasicAuth:
-    """web-auth-user/web-auth-password gate /status, /player, /setting (and
-    their APIs/SSE) for non-local clients only."""
-
-    def _config(self, port: int) -> str:
-        return f"""\
-[global]
-verbosity = 4
-xff = 1
-web-auth-user = admin
-web-auth-password = secret
-
-[bind]
-* {port}
-"""
-
-    def _basic_auth_header(self, user: str, password: str) -> dict:
-        token = base64.b64encode(f"{user}:{password}".encode()).decode()
-        return {"Authorization": f"Basic {token}"}
-
-    def test_local_client_bypasses_auth(self, r2h_binary):
-        port = find_free_port()
-        r2h = R2HProcess(r2h_binary, port, config_content=self._config(port))
-        try:
-            r2h.start()
-            status, _, _ = http_get("127.0.0.1", port, "/status")
-            assert status == 200
-        finally:
-            r2h.stop()
-
-    def test_non_local_client_requires_auth(self, r2h_binary):
-        port = find_free_port()
-        r2h = R2HProcess(r2h_binary, port, config_content=self._config(port))
-        try:
-            r2h.start()
-            status, hdrs, _ = http_get("127.0.0.1", port, "/status", headers={"X-Forwarded-For": "8.8.8.8"})
-            assert status == 401
-            assert "Basic" in get_header(hdrs, "WWW-Authenticate")
-
-            status, _, _ = http_get(
-                "127.0.0.1",
-                port,
-                "/status",
-                headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "secret")},
-            )
-            assert status == 200
-
-            status, _, _ = http_get(
-                "127.0.0.1",
-                port,
-                "/status",
-                headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "wrong")},
-            )
-            assert status == 401
-        finally:
-            r2h.stop()
-
-    def test_non_local_client_setting_and_player_require_auth(self, r2h_binary):
-        port = find_free_port()
-        r2h = R2HProcess(r2h_binary, port, config_content=self._config(port))
-        try:
-            r2h.start()
-            for path in ("/player", "/setting", "/setting/api/get-config"):
-                status, _, _ = http_get("127.0.0.1", port, path, headers={"X-Forwarded-For": "8.8.8.8"})
-                assert status == 401, f"{path} should require auth"
-
-                status, _, _ = http_get(
-                    "127.0.0.1",
-                    port,
-                    path,
-                    headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "secret")},
-                )
-                assert status == 200, f"{path} should succeed with correct credentials"
-        finally:
-            r2h.stop()
-
-    def test_non_local_stream_route_unaffected(self, r2h_binary):
-        port = find_free_port()
-        config = self._config(port) + "\n[services]\nrtp://239.0.0.1:1234\n"
-        r2h = R2HProcess(r2h_binary, port, config_content=config)
-        try:
-            r2h.start()
-            status, _, _ = http_request(
-                "127.0.0.1",
-                port,
-                "HEAD",
-                "/rtp/239.0.0.1:1234",
-                headers={"X-Forwarded-For": "8.8.8.8"},
-                timeout=3.0,
-            )
-            assert status == 200
-        finally:
-            r2h.stop()
-
-    def test_r2h_token_and_basic_auth_both_required(self, r2h_binary):
-        """When r2h-token and Basic Auth are both configured, a non-local
-        request must satisfy both -- neither alone is sufficient."""
-        port = find_free_port()
-        config = f"""\
-[global]
-verbosity = 4
-xff = 1
-r2h-token = sometoken
-web-auth-user = admin
-web-auth-password = secret
-
-[bind]
-* {port}
-"""
-        r2h = R2HProcess(r2h_binary, port, config_content=config)
-        try:
-            r2h.start()
-
-            # Neither r2h-token nor Basic Auth provided.
-            status, _, _ = http_get("127.0.0.1", port, "/status", headers={"X-Forwarded-For": "8.8.8.8"})
-            assert status == 401
-
-            # Only Basic Auth provided -- r2h-token check runs first and rejects.
-            status, _, _ = http_get(
-                "127.0.0.1",
-                port,
-                "/status",
-                headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "secret")},
-            )
-            assert status == 401
-
-            # Only r2h-token provided -- Basic Auth check still applies.
-            status, _, _ = http_get(
-                "127.0.0.1",
-                port,
-                "/status?r2h-token=sometoken",
-                headers={"X-Forwarded-For": "8.8.8.8"},
-            )
-            assert status == 401
-
-            # Both provided correctly.
-            status, _, _ = http_get(
-                "127.0.0.1",
-                port,
-                "/status?r2h-token=sometoken",
-                headers={"X-Forwarded-For": "8.8.8.8", **self._basic_auth_header("admin", "secret")},
-            )
-            assert status == 200
-        finally:
-            r2h.stop()
-
-    def test_require_local_forces_auth_for_loopback(self, r2h_binary):
-        port = find_free_port()
-        config = f"""\
-[global]
-verbosity = 4
-web-auth-user = admin
-web-auth-password = secret
-web-auth-require-local = 1
-
-[bind]
-* {port}
-"""
-        r2h = R2HProcess(r2h_binary, port, config_content=config)
-        try:
-            r2h.start()
-            status, _, _ = http_get("127.0.0.1", port, "/status")
-            assert status == 401
-
-            status, _, _ = http_get("127.0.0.1", port, "/status", headers=self._basic_auth_header("admin", "secret"))
-            assert status == 200
         finally:
             r2h.stop()
