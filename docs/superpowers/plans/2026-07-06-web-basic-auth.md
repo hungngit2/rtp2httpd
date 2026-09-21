@@ -474,9 +474,7 @@ web-auth-password = secret
         r2h = R2HProcess(r2h_binary, port, config_content=self._config(port))
         try:
             r2h.start()
-            status, hdrs, _ = http_get(
-                "127.0.0.1", port, "/status", headers={"X-Forwarded-For": "8.8.8.8"}
-            )
+            status, hdrs, _ = http_get("127.0.0.1", port, "/status", headers={"X-Forwarded-For": "8.8.8.8"})
             assert status == 401
             assert "Basic" in get_header(hdrs, "WWW-Authenticate")
 
@@ -504,9 +502,7 @@ web-auth-password = secret
         try:
             r2h.start()
             for path in ("/player", "/setting", "/setting/api/get-config"):
-                status, _, _ = http_get(
-                    "127.0.0.1", port, path, headers={"X-Forwarded-For": "8.8.8.8"}
-                )
+                status, _, _ = http_get("127.0.0.1", port, path, headers={"X-Forwarded-For": "8.8.8.8"})
                 assert status == 401, f"{path} should require auth"
 
                 status, _, _ = http_get(
@@ -521,7 +517,7 @@ web-auth-password = secret
 
     def test_non_local_stream_route_unaffected(self, r2h_binary):
         port = find_free_port()
-        config = self._config(port) + '\n[services]\nrtp://239.0.0.1:1234\n'
+        config = self._config(port) + "\n[services]\nrtp://239.0.0.1:1234\n"
         r2h = R2HProcess(r2h_binary, port, config_content=config)
         try:
             r2h.start()
@@ -555,9 +551,7 @@ web-auth-require-local = 1
             status, _, _ = http_get("127.0.0.1", port, "/status")
             assert status == 401
 
-            status, _, _ = http_get(
-                "127.0.0.1", port, "/status", headers=self._basic_auth_header("admin", "secret")
-            )
+            status, _, _ = http_get("127.0.0.1", port, "/status", headers=self._basic_auth_header("admin", "secret"))
             assert status == 200
         finally:
             r2h.stop()
