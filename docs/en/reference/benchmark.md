@@ -1,106 +1,142 @@
 # Performance Benchmark
 
-Performance comparison of **rtp2httpd**, **[msd_lite](https://github.com/rozhuk-im/msd_lite)**, **[udpxy](https://github.com/pcherenkov/udpxy)**, and **[tvgate](https://github.com/qist/tvgate)** — four multicast-to-unicast conversion programs.
+Compare **rtp2httpd**, **[msd_lite](https://github.com/rozhuk-im/msd_lite)**, **[udpxy](https://github.com/pcherenkov/udpxy)**, and **[TVGate](https://github.com/qist/tvgate)** for CPU and memory consumption with multiple channels, multiple clients sharing one channel, and high-bitrate input.
 
-## Test Environment
+## Test Environment and Versions
 
-- **Platform**: Ubuntu 24.04 on Apple M3 Max (Parallels Desktop virtual machine)
-- **Architecture**: aarch64 (all programs compiled natively as arm64 binaries)
-- **Kernel**: Linux 6.8.0-90-generic
-- **Test duration**: 10 seconds per test
-- **Measurement methodology**:
-  - CPU: Sampled using `top -b -n 2`
-  - Memory: USS (Unique Set Size) read from `/proc/[pid]/smaps_rollup`
-  - For processes with forked children, CPU and memory are summed across all parent and child processes
-- **Tested versions**:
-  - rtp2httpd: v3.8.3
-  - msd_lite: commit 79a6c62 (2025-05-02)
-  - udpxy: commit 56fc563 (2026-01-26)
-  - tvgate: v2.1.8
+- Test date: 2026-09-06.
+- Host: Apple M3 Max; Parallels Ubuntu 24.04 virtual machine with 16 vCPUs and 16 GiB RAM.
+- System: Linux 6.8.0-138-generic, aarch64; all programs run natively on ARM64.
+- Compiler: GCC 13.3.0. rtp2httpd uses Release and `ENABLE_AGGRESSIVE_OPT=ON`; msd_lite uses `-O3`, LTO, and the same inlining, loop-unrolling, and vectorization options; udpxy uses `-O3 -flto`. TVGate uses its official release binary.
+- Multicast input and HTTP output both use `lo`, with no kernel network tuning. `net.core.rmem_max` and `net.core.wmem_max` are both 212992; TCP congestion control is cubic.
+
+| Program | Tested version |
+| --- | --- |
+| rtp2httpd | [v3.17.0-beta.1](https://github.com/stackia/rtp2httpd/releases/tag/v3.17.0-beta.1) |
+| msd_lite | [`fa68e131`](https://github.com/rozhuk-im/msd_lite/commit/fa68e131343fb58c67ad77b2d26f2cb7c49a2c95), 2026-07-20; liblcb `e2f420a2` |
+| udpxy | [`31d4bcfa`](https://github.com/pcherenkov/udpxy/commit/31d4bcfabaade59d3efdee015df7979febf76bae), 2026-04-13 |
+| TVGate | [v3.2.0](https://github.com/qist/tvgate/releases/tag/v3.2.0), 2026-09-06 |
+
+## Measurement Method
+
+rtp2httpd uses `-C -w 1`, msd_lite uses one event-loop thread, and udpxy retains its native process-per-client model. All processes and threads of these three programs are pinned to one vCPU. TVGate runs without a `GOMAXPROCS` override or an additional CPU-affinity restriction, using default multicore scheduling across all 16 VM vCPUs. Scheduling policies differ, so the results describe server CPU costs under the specified input load and configuration.
+
+CPU utilization is the change in user and system CPU time from `/proc/PID/stat` over the complete measurement window, divided by actual wall time and summed over the entire server process tree. **100% means one fully occupied vCPU**; multicore programs can exceed 100%. Generators, readers, and the measurement controller are pinned to other vCPUs. Their CPU is recorded separately and excluded from server CPU; TVGate's default scheduler can use these vCPUs too.
+
+PSS and USS are sampled every second from `smaps_rollup` and summed over the process tree. PSS proportionally includes shared pages, while USS includes only private pages. Neither includes all kernel socket memory or unmapped anonymous-file cache pages, so these metrics do not represent total server memory cost.
+
+Each RTP datagram carries seven 188-byte MPEG-TS null packets, totaling 1316 payload bytes. Readers decode HTTP chunk framing and continuously consume the stream. Each trial restarts the server and load processes, then warms up after every client starts receiving data. Tests run sequentially. The program order rotates each round, so every program occupies each execution position once over four rounds.
+
+msd_lite retains the upstream example's 48 KiB receive watermark, 64 KiB send watermark, and 1 MiB ring buffer; only the listener, interface, thread count, logging, and congestion control are adapted. udpxy retains its default buffer settings. TVGate configures only its listening port and loopback multicast interfaces; concurrency, buffering, connection limits, and logging use application defaults.
 
 ## Test Scenarios
 
-| Test                  | Description                                                                               |
-| --------------------- | ----------------------------------------------------------------------------------------- |
-| **Multi-stream test** | 8 clients, each requesting different multicast addresses, ~40 Mbps per stream (simulating 4K IPTV bitrate) |
-| **Single-stream test** | 8 clients, all requesting the same multicast address, ~40 Mbps per stream                |
-| **High-bandwidth test** | 1 client, single stream ~400 Mbps                                                        |
+| Scenario | Clients | Multicast sources | Payload rate per source | Repetitions | Warmup / sampling per trial |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Multiple channels | 8 | 8 | 40 Mbps | 4 | 5 s / 15 s |
+| 8 clients sharing one channel | 8 | 1 | 40 Mbps | 4 | 5 s / 15 s |
+| 64 clients sharing one channel | 64 | 1 | 20 Mbps | 4 | 5 s / 15 s |
+| High bitrate | 1 | 1 | 400 Mbps | 4 | 5 s / 15 s |
 
-## Test Results Summary
+## Results
 
-### CPU Usage (%)
+CPU and memory statistics include every completed measurement in each scenario. They measure resource consumption under the specified load, without certifying forwarding correctness or maximum sustainable throughput.
 
-| Test Scenario              | rtp2httpd     | msd_lite | udpxy   | tvgate  |
-| -------------------------- | ------------- | -------- | ------- | ------- |
-| Multi-stream (8 different addresses) | 🏆 **17.00%** | 25.80%   | 106.00% | 331.00% |
-| Single-stream (8 same address)       | 🏆 **14.00%** | 14.20%   | 85.00%  | 51.45%  |
-| High-bandwidth (400 Mbps)            | 🏆 **26.73%** | 39.50%   | 30.85%  | 89.53%  |
+### CPU Utilization
 
-### Memory Usage (MB)
+Values are the means of per-trial average CPU utilization.
 
-| Test Scenario              | rtp2httpd   | msd_lite    | udpxy | tvgate |
-| -------------------------- | ----------- | ----------- | ----- | ------ |
-| Multi-stream (8 different addresses) | 🏆 **4.50** | 10.25       | 12.53 | 182.00 |
-| Single-stream (8 same address)       | 4.88        | 🏆 **2.62** | 12.53 | 33.25  |
-| High-bandwidth (400 Mbps)            | 3.88        | 🏆 **2.62** | 3.21  | 47.38  |
+| Scenario | rtp2httpd | msd_lite | udpxy | TVGate |
+| --- | ---: | ---: | ---: | ---: |
+| 8 channels, 40 Mbps each | 🏆 3.69% | 12.28% | 23.02% | 56.65% |
+| 8 clients, one 40 Mbps channel | 🏆 4.87% | 5.58% | 30.92% | 45.09% |
+| 64 clients, one 20 Mbps channel | 🏆 4.78% | 5.50% | 59.93% | 115.08% |
+| 1 client, 400 Mbps | 🏆 12.88% | 15.46% | 26.45% | 57.86% |
 
-## Detailed Test Results
+### PSS Memory (MiB)
 
-### Test 1: Multi-stream Scenario (8 clients, different addresses, ~40 Mbps each)
+| Scenario | rtp2httpd | msd_lite | udpxy | TVGate |
+| --- | ---: | ---: | ---: | ---: |
+| 8 channels, 40 Mbps each | 1.86 | 8.95 | 🏆 0.79 | 25.82 |
+| 8 clients, one 40 Mbps channel | 1.13 | 1.35 | 🏆 0.79 | 22.76 |
+| 64 clients, one 20 Mbps channel | 🏆 1.30 | 1.37 | 4.55 | 46.26 |
+| 1 client, 400 Mbps | 1.26 | 1.34 | 🏆 0.32 | 19.16 |
 
-Each client requests a different multicast address (239.81.0.1-8), testing the server's ability to handle multiple independent streams.
+### USS Memory (MiB)
 
-| Metric   | rtp2httpd      | msd_lite | udpxy    | tvgate    |
-| -------- | -------------- | -------- | -------- | --------- |
-| CPU Avg  | 🏆 **17.00%**  | 25.80%   | 106.00%  | 331.00%   |
-| CPU Peak | 🏆 **18.00%**  | 30.00%   | 116.00%  | 332.00%   |
-| Mem Avg  | 🏆 **4.50 MB** | 10.25 MB | 12.53 MB | 182.00 MB |
+| Scenario | rtp2httpd | msd_lite | udpxy | TVGate |
+| --- | ---: | ---: | ---: | ---: |
+| 8 channels, 40 Mbps each | 1.24 | 8.94 | 🏆 0.52 | 25.82 |
+| 8 clients, one 40 Mbps channel | 🏆 0.51 | 1.34 | 0.52 | 22.76 |
+| 64 clients, one 20 Mbps channel | 🏆 0.68 | 1.35 | 3.96 | 46.26 |
+| 1 client, 400 Mbps | 0.63 | 1.33 | 🏆 0.12 | 19.16 |
 
-### Test 2: Single-stream Scenario (8 clients, same address, ~40 Mbps)
+## Appendix: Performance Optimization Strategies in rtp2httpd
 
-All 8 clients request the same multicast address, testing the server's multicast reuse efficiency.
+### Allocate Memory by Lifetime
 
-| Metric   | rtp2httpd     | msd_lite       | udpxy    | tvgate   |
-| -------- | ------------- | -------------- | -------- | -------- |
-| CPU Avg  | 🏆 **14.00%** | 14.20%         | 85.00%   | 51.45%   |
-| CPU Peak | 18.00%        | 🏆 **15.00%**  | 108.00%  | 52.90%   |
-| Mem Avg  | 4.88 MB       | 🏆 **2.62 MB** | 12.53 MB | 33.25 MB |
+Connections allocate RTSP or HTTP proxy state only for the protocol they use. FEC group tables are allocated when recovery groups need to be stored. HTTP input buffers and parsed requests use separate anonymous memory mappings: input storage is released after parsing and routing, while ordinary media streams release parsed request data after generating response headers. HTTP proxies retain the request headers and body they still use. Temporary request pages can return directly to the operating system instead of remaining in the heap alongside long-lived connections.
 
-### Test 3: High-bandwidth Scenario (1 client, ~400 Mbps)
+Ordinary shared multicast clients use the source's reorder window instead of allocating unused private arrays. Private windows are allocated for RTSP, FCC, snapshots, or FEC processing. When FEC appears during a stream, both existing clients and later subscribers receive their own windows.
 
-Single client receiving a high-bandwidth stream (50x speed playback ≈ 400 Mbps).
+The packet pool starts with 128 buffers and grows in increments of 128. The control pool starts with 16 and grows in increments of 16. The worker periodically reclaims completely idle segments while retaining a base capacity. Client queue budgets are calculated separately from the initial allocation, so reducing initial memory does not reduce the existing buffering allowance.
 
-| Metric   | rtp2httpd     | msd_lite       | udpxy   | tvgate   |
-| -------- | ------------- | -------------- | ------- | -------- |
-| CPU Avg  | 🏆 **26.73%** | 39.50%         | 30.85%  | 89.53%   |
-| CPU Peak | 🏆 **29.40%** | 40.00%         | 46.00%  | 96.00%   |
-| Mem Avg  | 3.88 MB       | 🏆 **2.62 MB** | 3.21 MB | 47.38 MB |
+### Shared Multicast Subscriptions Within Each Worker
 
-## Conclusions
+Each worker maintains a shared-source registry keyed by the resolved multicast address, port, SSM source address, effective upstream interface, and FEC port. Channel names, `/rtp/` versus `/udp/` spelling, and FCC server parameters do not participate in matching. Requests for the same resource create one main multicast socket and, when configured, one FEC socket.
 
-**rtp2httpd** demonstrates excellent overall performance in the benchmark tests:
+Each source owns its lifecycle, timeout, and rejoin timers. Clients hold subscription references; releasing the last reference closes the sockets and destroys source state. When the first client leaves, event dispatch is reassigned to a surviving subscriber. Workers continue to maintain their source registries independently.
 
-- **Highest CPU efficiency**: Achieved the lowest CPU usage across all three test scenarios. In the multi-stream scenario, it used only 66% of msd_lite's CPU, 16% of udpxy's, and 5% of tvgate's
-- **Outstanding multi-stream processing capability**: When simultaneously handling 8 independent 4K multicast streams, both CPU and memory usage were the lowest, making it ideal for multi-channel IPTV gateway scenarios
-- **Stable high-bandwidth performance**: At 400 Mbps high bitrate, CPU usage was only 27%, leaving ample performance headroom
-- **Reasonable memory footprint**: Approximately 4 MB memory usage (with all default parameters), stable across all scenarios, suitable for resource-constrained embedded devices
+This primarily reduces duplicate local socket receives, system calls, and application processing. Multiple local sockets joining one multicast group do not necessarily cause the upstream link to carry the same number of complete streams.
 
-Compared to udpxy's fork-per-client model, rtp2httpd uses a more efficient event-driven architecture, showing significant advantages in high-concurrency scenarios. Compared to msd_lite, rtp2httpd excels in CPU efficiency, especially in multi-stream concurrent scenarios.
+### Shared Parsing, Reordering, and Batch Payloads
 
-## Running the Benchmark
+For ordinary multicast, the shared source parses and reorders RTP once, then combines payloads into batches with a capacity of 64 KiB. Each RTP payload remains intact: the current batch is flushed before the next payload would exceed capacity. The 1316-byte payloads produce batches of 49 packets, or 64484 bytes. This reduces both repeated per-client parsing and per-packet fanout and send calls. Partial batches flush at the next worker timer check after reaching 100 ms of age. The timer runs every 100 ms; scheduling also affects actual latency.
 
-See [tools/stress-test/README.md](https://github.com/stackia/rtp2httpd/blob/main/tools/stress-test/README.md) for stress test tooling and methodology.
+The Buffer layer adds an on-demand 64 KiB batch pool alongside the existing 1536-byte packet pool and control pool. The worker owns the batch pool, so queued data can outlive its multicast source. It initially allocates four batches and grows in increments of four. Its maximum capacity is derived from a `buffer-pool-max-size × 1536` byte budget, with room for at least four batches. This limit applies to the batch pool separately from the original packet pool. If the batch pool is exhausted, forwarding can continue through small-packet references.
 
-Single stress test:
+Multiple clients share the underlying payload while each owns a separate `buffer_ref_t` view. Its `owner` points to the same immutable data; list links, send offsets, and remaining lengths stay independent. A partial send updates only that client's view. The backing memory returns to the pool only after the last view is released. Each client retains its own send queue and capacity limit, so a slow client does not pause reception for other subscribers. A source with only one subscriber uses the batch descriptor directly, avoiding an extra view allocation.
+
+Queue limits now charge the backing buffer capacity instead of assuming “buffer count × 1536.” A batch with only a few unsent bytes still consumes the full 64 KiB allowance until that client releases its reference. This prevents shared large buffers from bypassing the existing slow-client memory limits.
+
+### Reduce Fixed Receive and Send Costs
+
+Platforms supporting `recvmmsg` receive up to 16 datagrams per call. The worker reuses receive descriptors and unconsumed packet buffers. After processing, a packet buffer with no other references is reused for the next receive. If a reorder window, FEC state, or send queue still holds a reference, reception uses another buffer to avoid overwriting pending data. Data arrives directly in pool buffers, avoiding an additional copy after reception; platforms without batch reception receive one packet at a time. Once initial RTP reordering is complete, an expected packet can be delivered directly when the window is empty and FEC is disabled, avoiding insertion into and removal from reorder slots.
+
+The main multicast socket is read immediately on its first readiness notification. Subsequent reception can coalesce up to 1–2 ms of work, depending on the actual receive-buffer capacity and the number of datagrams received, reducing event wakeups for continuous small packets. A 1 ms wait requires a system-reported receive buffer of at least 128 KiB; 2 ms requires at least 256 KiB and a low packet count. System scheduling also affects the actual interval. Readiness notifications are paused during deferred reception and rearmed after the socket is drained. The worker scans only sources with pending receive tasks, and removes a source's task when its last subscriber leaves.
+
+Small receive buffers, or a failed capacity query, use level-triggered notifications. A read reaching a conservative packet-count threshold derived from buffer capacity also restores immediate reception. The packet rate is then reassessed over windows of at least 100 ms. A lower rate with twice the scheduling headroom permits another coalescing attempt, so a single burst cannot permanently disable the optimization. With level triggering, a short batch can return because remaining data still generates notifications. Deferred reception must confirm that the socket is drained so an interrupted short read cannot strand data. Each callback receives at most 256 main multicast datagrams so continuous traffic cannot occupy the event loop indefinitely. These strategies are selected automatically and require no additional configuration.
+
+Writes enter a local worker queue first. The worker subscribes to kernel writable events only when a socket cannot make further progress, reducing per-batch event registration changes. Each connection sends at most 256 KiB per turn, and each event-loop iteration processes at most 128 write tasks. Remaining tasks stay queued so reception, timers, and other clients can also run.
+
+Client ownership checks in status tracking use a process-local cached PID, refreshed after every fork. This removes repeated `getpid()` calls from queue and send-statistics updates.
+
+Queue limits, counters, and high-water marks still update on every queue operation, while publication to shared status memory runs on the worker's 100 ms timer. This reduces repeated shared-memory writes and synchronization during batch enqueueing and sending. The status page displays the most recently published queue snapshot.
+
+### Immutable Batch Snapshots
+
+Platforms supporting memory-file sealing use `memfd_create` to create anonymous memory files for shared batches. Each file is written once, sealed, and sent to multiple clients through `sendfile`, reusing the same kernel pages. This path applies only when multiple clients share a nearly full batch. Ordinary memory buffers continue to use `sendmsg`.
+
+Every batch gets a new file. Once published, it cannot be written, grown, or truncated; reusing pool memory never overwrites an old file. TCP may still reference its pages after `sendfile` returns and the application closes its last file reference. Immutability ensures that a new batch cannot alter those pending bytes. File creation, writing, or sealing failures retain memory sending. If a client's `sendfile` operation is unsupported, only that client's view falls back to memory sending.
+
+### FCC, FEC, and Client Isolation
+
+FCC unicast and switching state remain independent per client. The handoff first shares the multicast socket. After unicast and pending data have drained and the reorder sequence aligns with the shared source, the client joins shared batch delivery. The previous batch is flushed before the switch so the new subscriber does not replay older content.
+
+Snapshots retain independent processing state. Sources configured with an FEC port share sockets but retain per-client reordering and FEC recovery. If in-band FEC first appears during a stream, the source flushes its existing batch and transfers the shared reorder window to each client before switching to private processing. The ordinary-multicast CPU measurements in this report therefore do not directly represent FCC unicast, FEC recovery, or snapshot workloads.
+
+## Scope
+
+This measures fixed-bitrate forwarding resources inside an ARM64 Linux virtual machine, rather than physical-NIC throughput limits, video decoding, or maximum client capacity. Loopback kernel work charged to generators and readers is outside server CPU, and host scheduling introduces variation. Other hardware, bitrates, client speeds, channel counts, and network paths require separate measurements.
+
+## Reproducing the Tests
+
+See [tools/stress-test/README.md](https://github.com/stackia/rtp2httpd/blob/main/tools/stress-test/README.md) for the harness and options. Prepare the corresponding binaries, then run all four scenarios:
 
 ```bash
-uv run python tools/stress-test/stress_test.py --program rtp2httpd --duration 10 --clients 8 --speed 5
+scripts/benchmark.sh rtp2httpd msd_lite udpxy tvgate \
+  --cases distinct8 shared8 shared64 high400 \
+  --repetitions 4 --warmup 5 --duration 15
 ```
 
-Full benchmark suite:
-
-```bash
-scripts/benchmark.sh
-```
-
-Test results are saved to `tools/stress-test/benchmark_results_YYYYMMDD_HHMMSS.txt`.
+Use `--binary NAME=PATH` and `--revision NAME=VERSION` to identify the actual executables and versions. Set repetitions and sampling duration for each scenario according to the table above. CPU, PSS, and USS summaries are written to `resources.json` in the output directory, which defaults to `build/benchmark/`. Test records remain local.

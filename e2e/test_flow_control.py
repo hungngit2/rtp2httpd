@@ -2,8 +2,8 @@
 E2E coverage for the upstream flow-control fix.
 
 A slow downstream client used to be aborted partway through a large HTTP
-proxy response because the per-connection zerocopy queue would saturate and
-``connection_queue_zerocopy()`` would return -1 (packet-drop semantics
+proxy response because the per-connection send queue would saturate and
+``connection_queue_buffer()`` would return -1 (packet-drop semantics
 inherited from RTP/UDP).  The fix pauses upstream reads when the client send
 queue exceeds the high watermark and resumes them once it drops back below
 the low watermark.
@@ -23,7 +23,6 @@ import socket
 import time
 
 import pytest
-
 from helpers import (
     MockHTTPUpstream,
     R2HProcess,
@@ -37,7 +36,7 @@ pytestmark = pytest.mark.slow
 @pytest.fixture(scope="module")
 def shared_r2h(r2h_binary):
     # ``-b 128`` shrinks the global buffer pool cap to 128 buffers
-    # (~192 KiB), which forces the per-connection zerocopy queue limit
+    # (~192 KiB), which forces the per-connection send queue limit
     # down to ~96 KiB.  With the default cap (16384 buffers / ~24 MiB) a
     # short test body would be absorbed entirely without ever crossing
     # the HWM, defeating the whole purpose of these tests.
@@ -66,7 +65,7 @@ def _slow_drain_until_eof(
     sock = socket.create_connection((host, port), timeout=overall_timeout)
     body = b""
     try:
-        sock.sendall(("GET %s HTTP/1.0\r\nHost: %s\r\n\r\n" % (path, host)).encode())
+        sock.sendall((f"GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n").encode())
 
         deadline = time.monotonic() + overall_timeout
         buf = b""
@@ -77,7 +76,7 @@ def _slow_drain_until_eof(
             sock.settimeout(min(remaining, 2.0))
             try:
                 piece = sock.recv(chunk_size)
-            except socket.timeout:
+            except TimeoutError:
                 continue
             except OSError:
                 break
@@ -120,11 +119,11 @@ class TestHTTPProxyBackpressure:
     """A slow HTTP client must receive the full proxied body."""
 
     def test_slow_client_receives_full_body(self, shared_r2h):
-        # 1 MiB body comfortably exceeds the ~96 KiB zerocopy queue limit
+        # 1 MiB body comfortably exceeds the ~96 KiB send queue limit
         # imposed by the ``-b 128`` shared_r2h fixture, so the slow client
         # forces multiple pause/resume cycles before EOF.
         body_size = 1024 * 1024
-        payload = bytes((i & 0xFF for i in range(body_size)))
+        payload = bytes(i & 0xFF for i in range(body_size))
 
         upstream = MockHTTPUpstream(
             routes={"/big.ts": {"status": 200, "body": payload, "headers": {"Content-Type": "video/mp2t"}}}
@@ -134,15 +133,14 @@ class TestHTTPProxyBackpressure:
             status, _, received = _slow_drain_until_eof(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/big.ts" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/big.ts",
                 chunk_size=8 * 1024,
                 sleep_per_chunk=0.02,  # ~400 KB/s ceiling, well below pool refill rate
                 overall_timeout=20.0,
             )
             assert status == 200, "Slow client should still receive a 200 response"
-            assert len(received) == body_size, "Slow client received %d/%d bytes — flow control regression?" % (
-                len(received),
-                body_size,
+            assert len(received) == body_size, (
+                f"Slow client received {len(received)}/{body_size} bytes — flow control regression?"
             )
             assert received == payload, "Body content mismatch — corruption in proxy path"
         finally:

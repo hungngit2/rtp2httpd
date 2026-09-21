@@ -26,7 +26,7 @@ rtp2httpd [选项]
 rtp2httpd --listen 5140 --listen 192.168.1.1:8081 --listen '[::1]:5140' --listen /var/run/rtp2httpd.sock
 ```
 
-Unix socket 监听路径必须是绝对路径，且路径中不能包含空白字符。启动时如果同路径已存在 socket 文件，rtp2httpd 会先探测该 socket 是否仍在使用：如果已有进程正在监听该路径，则拒绝启动；只有确认是残留 socket 文件时才会自动清理。如果同路径是普通文件、目录或符号链接，则会拒绝启动以避免误删数据。启用任意 Unix socket 监听时，`zerocopy-on-send` 会被全局关闭。
+Unix socket 监听路径必须是绝对路径，且路径中不能包含空白字符。启动时如果同路径已存在 socket 文件，rtp2httpd 会先探测该 socket 是否仍在使用：如果已有进程正在监听该路径，则拒绝启动；只有确认是残留 socket 文件时才会自动清理。如果同路径是普通文件、目录或符号链接，则会拒绝启动以避免误删数据。
 
 #### 上游网络接口配置
 
@@ -53,10 +53,6 @@ Unix socket 监听路径必须是绝对路径，且路径中不能包含空白�
   - 对于 30 Mbps 的 4K IPTV 流，512KB 可提供约 140ms 的缓冲
   - 增大此值以减少高带宽流的丢包
   - 实际缓冲区大小可能受内核参数 `net.core.rmem_max` 限制
-- `-Z, --zerocopy-on-send` - 启用零拷贝发送以提升性能 (默认: 关闭)
-  - 需要内核支持 MSG_ZEROCOPY (Linux 4.14+)
-  - 在支持的设备上提升吞吐量并降低 CPU 占用
-  - 如果你的 rtp2httpd 位于反向代理之后 (nginx/caddy/lucky 等)，不建议开启这个选项
 
 ### FCC 快速换台
 
@@ -231,13 +227,6 @@ buffer-pool-max-size = 16384
 # 增大此值以减少高带宽流的丢包
 # 实际缓冲区大小可能受内核参数 net.core.rmem_max 限制
 udp-rcvbuf-size = 524288
-
-# 启用零拷贝发送以提升性能（默认: no）
-# 设为 yes/true/on/1 以启用零拷贝
-# 需要内核支持 MSG_ZEROCOPY (Linux 4.14+)
-# 在支持的设备上可提升吞吐量并降低 CPU 占用，特别是在高并发负载下
-# 如果你的 rtp2httpd 位于反向代理之后 (nginx/caddy/lucky 等)，不建议开启这个选项
-zerocopy-on-send = no
 
 # 覆盖上游 HTTP 代理请求的 User-Agent（默认: 不覆盖）
 # 设置后将替换发送给 /http/ 上游服务器的客户端 User-Agent

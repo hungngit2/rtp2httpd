@@ -1,6 +1,9 @@
 .vscode/
 .zed/
 
+# Local debug script
+/local-debug.sh
+
 # macOS
 .DS_Store
 
@@ -8,10 +11,9 @@
 .cache/
 compile_commands.json
 
-# Build directories
-build/
-build-*/
-!.claude/skills/build-run/
+# Build directories (repo root only)
+/build/
+/build-*/
 
 # Toolchain directory (auto-downloaded)
 toolchain/
@@ -31,6 +33,7 @@ __pycache__/
 
 # Benchmark results
 tools/benchmark_results_*.txt
+tools/stress-test/results/
 
 # iKuai package outputs
 ikuai-support/.staging/

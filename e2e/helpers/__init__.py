@@ -6,7 +6,7 @@ RTP packet crafting, and the R2HProcess wrapper.
 
 Sub-modules:
     constants   - project paths and platform constants
-    ports       - free port allocation and wait_for_port
+    ports       - per-worker listen-port allocation and wait_for_port
     http        - HTTP client helpers (http_get, http_request, stream_get)
     rtp         - RTP packet crafting and MulticastSender
     r2h_process - R2HProcess server wrapper
@@ -16,6 +16,7 @@ Sub-modules:
 
 # Re-export everything so ``from helpers import X`` keeps working.
 
+from .config import build_config, build_single_service_config, write_temp_file
 from .constants import (
     BINARY_PATH,
     FIXTURES_DIR,
@@ -23,7 +24,6 @@ from .constants import (
     MCAST_ADDR,
     PROJECT_ROOT,
 )
-from .config import build_config, build_single_service_config, write_temp_file
 from .http import (
     assert_etag_cache_behavior,
     extract_catchup_source,
@@ -46,8 +46,10 @@ from .mock_rtsp import (
     MockRTSPServerNoTeardownResponse,
     MockRTSPServerSilent,
     MockRTSPServerUDP,
+    MockRTSPServerZTE,
 )
 from .mock_stun import MockSTUNServer
+from .native import run_native_test
 from .ports import (
     find_free_port,
     find_free_udp_port,
@@ -55,6 +57,7 @@ from .ports import (
     ipv6_loopback_available,
     wait_for_port,
     wait_for_unix_socket,
+    worker_port_range,
 )
 from .r2h_process import R2HProcess, make_m3u_rtsp_config
 from .rtp import MulticastSender, make_rtp_packet
@@ -73,6 +76,7 @@ __all__ = [
     "MockRTSPServerNoTeardownResponse",
     "MockRTSPServerSilent",
     "MockRTSPServerUDP",
+    "MockRTSPServerZTE",
     "MockSTUNServer",
     "MulticastSender",
     "R2HProcess",
@@ -92,11 +96,13 @@ __all__ = [
     "make_m3u_rtsp_config",
     "make_rtp_packet",
     "raw_http_request",
+    "run_native_test",
     "stream_get",
     "unix_http_get",
     "unix_http_request",
     "wait_for_port",
     "wait_for_status_payload",
     "wait_for_unix_socket",
+    "worker_port_range",
     "write_temp_file",
 ]

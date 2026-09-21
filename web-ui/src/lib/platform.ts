@@ -7,6 +7,15 @@ export function isIOS(): boolean {
   return document.documentElement.dataset.playerPlatform === "ios";
 }
 
+/** Whether the player is running as an installed PWA / home-screen app.
+ *
+ * Reads the tag that `player.html` sets from `navigator.standalone` /
+ * `(display-mode: standalone)` before React boots.
+ */
+export function isStandalonePlayer(): boolean {
+  return document.documentElement.dataset.playerStandalone === "true";
+}
+
 /** Detect LG TV browsers that should use the platform-native media pipeline. */
 export function isLGWebOS(): boolean {
   return document.documentElement.dataset.playerPlatform === "lg-webos";
@@ -15,4 +24,18 @@ export function isLGWebOS(): boolean {
 /** Whether the current browser is a desktop-class device eligible for MSE video processing. */
 export function isDesktopDevice(): boolean {
   return document.documentElement.dataset.playerPlatform === "desktop";
+}
+
+/**
+ * Whether `HTMLMediaElement.volume` actually affects playback.
+ *
+ * iOS and iPadOS ignore volume writes because the level belongs to the hardware buttons;
+ * `muted` stays settable, so muting still works. Feature-detecting this does not work:
+ * assigning to a detached element's `volume` reads the value back unchanged, so a probe
+ * reports support that playback then does not honour. Hence the UA check, reusing the
+ * platform tag that `player.html` sets — it also covers iOS-wrapped browsers (CriOS,
+ * FxiOS, ...) and iPadOS reporting itself as MacIntel.
+ */
+export function isVolumeControlSupported(): boolean {
+  return !isIOS();
 }

@@ -8,12 +8,16 @@ These tests start a mock HTTP upstream, point rtp2httpd at it via
 import time
 
 import pytest
-
 from helpers import (
+    LOOPBACK_IF,
+    MCAST_ADDR,
     MockHTTPUpstream,
     MockHTTPUpstreamSilent,
+    MockRTSPServer,
+    MulticastSender,
     R2HProcess,
     find_free_port,
+    find_free_udp_port,
     http_get,
     stream_get,
 )
@@ -102,7 +106,7 @@ class TestProxyContentType:
         )
         upstream.start()
         try:
-            status, hdrs, body = http_get(
+            status, _hdrs, body = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
                 f"/http/127.0.0.1:{upstream.port}/api/data",
@@ -136,7 +140,7 @@ class TestProxyLargeBody:
             status, _, body = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/big" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/big",
                 timeout=10.0,
             )
             assert status == 200
@@ -163,7 +167,7 @@ class TestProxyQueryParams:
         )
         upstream.start()
         try:
-            status, _, body = http_get(
+            status, _, _body = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
                 f"/http/127.0.0.1:{upstream.port}/search?q=test&page=1",
@@ -186,7 +190,7 @@ class TestProxyQueryParams:
             status, _, body = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/search?%s=secret-token&q=test" % (upstream.port, token_param),
+                f"/http/127.0.0.1:{upstream.port}/search?{token_param}=secret-token&q=test",
                 timeout=5.0,
             )
             assert status == 200
@@ -194,6 +198,31 @@ class TestProxyQueryParams:
             assert upstream.requests_log, "expected upstream HTTP request"
             upstream_path = upstream.requests_log[0]["path"]
             assert "r2h-token" not in upstream_path.lower()
+            assert "q=test" in upstream_path
+        finally:
+            upstream.stop()
+
+    def test_r2h_filename_not_forwarded(self, shared_r2h):
+        """r2h-filename is local download metadata and should be stripped before upstream HTTP."""
+        upstream = MockHTTPUpstream(
+            routes={
+                "/search": {"status": 200, "body": b"found"},
+            }
+        )
+        upstream.start()
+        try:
+            status, headers, body = http_get(
+                "127.0.0.1",
+                shared_r2h.port,
+                f"/http/127.0.0.1:{upstream.port}/search?r2h-filename=clip.ts&q=test",
+                timeout=5.0,
+            )
+            assert status == 200
+            assert body == b"found"
+            assert "Content-Disposition" not in {key.lower() for key in headers}
+            assert upstream.requests_log, "expected upstream HTTP request"
+            upstream_path = upstream.requests_log[0]["path"]
+            assert "r2h-filename" not in upstream_path.lower()
             assert "q=test" in upstream_path
         finally:
             upstream.stop()
@@ -212,7 +241,7 @@ class TestProxyUnreachable:
         status, _, _ = stream_get(
             "127.0.0.1",
             shared_r2h.port,
-            "/http/127.0.0.1:%d/whatever" % dead_port,
+            f"/http/127.0.0.1:{dead_port}/whatever",
             read_bytes=512,
             timeout=6.0,
         )
@@ -247,7 +276,7 @@ class TestProxyUpstreamTimeout:
                 status, _, _ = stream_get(
                     "127.0.0.1",
                     r2h_port,
-                    "/http/127.0.0.1:%d/test" % upstream.port,
+                    f"/http/127.0.0.1:{upstream.port}/test",
                     read_bytes=256,
                     timeout=_HTTP_PROXY_TIMEOUT * _TIMEOUT_MAX_FACTOR + 5,
                 )
@@ -278,10 +307,10 @@ class TestProxyStatusCodes:
         )
         upstream.start()
         try:
-            status, _, body = http_get(
+            status, _, _body = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/err" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/err",
                 timeout=5.0,
             )
             assert status == 500
@@ -301,10 +330,10 @@ class TestProxyStatusCodes:
         )
         upstream.start()
         try:
-            status, hdrs, _ = http_get(
+            status, _hdrs, _ = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/redirect" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/redirect",
                 timeout=5.0,
             )
             assert status == 302
@@ -317,11 +346,11 @@ class TestProxyStatusCodes:
 # ---------------------------------------------------------------------------
 
 
-def _get_location(hdrs):
+def _get_location(hdrs: dict) -> str | None:
     """Extract Location header value (case-insensitive lookup)."""
     for k, v in hdrs.items():
         if k.lower() == "location":
-            return v
+            return str(v)
     return None
 
 
@@ -345,7 +374,7 @@ class TestProxyRedirectLocationRewrite:
             status, hdrs, _ = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/old" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/old",
                 timeout=5.0,
             )
             assert status == 302
@@ -408,7 +437,7 @@ app-path-prefix = {APP_PREFIX}
             status, hdrs, _ = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/moved" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/moved",
                 timeout=5.0,
             )
             assert status == 301
@@ -434,7 +463,7 @@ app-path-prefix = {APP_PREFIX}
             status, hdrs, _ = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/temp" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/temp",
                 timeout=5.0,
             )
             assert status == 307
@@ -460,7 +489,7 @@ app-path-prefix = {APP_PREFIX}
             status, hdrs, _ = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/redir-qs" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/redir-qs",
                 timeout=5.0,
             )
             assert status == 302
@@ -473,7 +502,7 @@ app-path-prefix = {APP_PREFIX}
             upstream.stop()
 
     def test_redirect_https_location_not_rewritten(self, shared_r2h):
-        """https:// Location should NOT be rewritten (only http:// is supported)."""
+        """https:// Location should NOT be rewritten (not an M3U-recognized scheme)."""
         upstream = MockHTTPUpstream(
             routes={
                 "/secure-redir": {
@@ -488,7 +517,7 @@ app-path-prefix = {APP_PREFIX}
             status, hdrs, _ = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/secure-redir" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/secure-redir",
                 timeout=5.0,
             )
             assert status == 302
@@ -517,7 +546,7 @@ app-path-prefix = {APP_PREFIX}
             status, hdrs, _ = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/ok-with-loc" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/ok-with-loc",
                 timeout=5.0,
             )
             assert status == 200
@@ -525,6 +554,290 @@ app-path-prefix = {APP_PREFIX}
             if location is not None:
                 assert location == "http://10.0.0.1:8080/other"
         finally:
+            upstream.stop()
+
+    def test_302_rtsp_location_rewritten(self, shared_r2h):
+        """302 Location with rtsp:// URL should be rewritten to /rtsp/... path."""
+        upstream = MockHTTPUpstream(
+            routes={
+                "/catchup": {
+                    "status": 302,
+                    "body": b"",
+                    "headers": {"Location": "rtsp://10.0.0.1:1554/iptv/live?auth=token123"},
+                },
+            }
+        )
+        upstream.start()
+        try:
+            status, hdrs, _ = http_get(
+                "127.0.0.1",
+                shared_r2h.port,
+                f"/http/127.0.0.1:{upstream.port}/catchup",
+                timeout=5.0,
+            )
+            assert status == 302
+            location = _get_location(hdrs)
+            assert location == "/rtsp/10.0.0.1:1554/iptv/live?auth=token123"
+        finally:
+            upstream.stop()
+
+    def test_302_rtsp_location_rewritten_with_app_path_prefix(self, r2h_binary):
+        """rtsp:// redirect Location should include app-path-prefix when configured."""
+        port = find_free_port()
+        config = f"""\
+[global]
+verbosity = 4
+app-path-prefix = {APP_PREFIX}
+
+[bind]
+* {port}
+"""
+        r2h = R2HProcess(r2h_binary, port, config_content=config)
+        upstream = MockHTTPUpstream(
+            routes={
+                "/catchup": {
+                    "status": 302,
+                    "body": b"",
+                    "headers": {"Location": "rtsp://10.0.0.1:1554/iptv/live"},
+                },
+            }
+        )
+        upstream.start()
+        try:
+            r2h.start()
+            status, hdrs, _ = http_get(
+                "127.0.0.1",
+                port,
+                f"{APP_PREFIX}/http/127.0.0.1:{upstream.port}/catchup",
+                timeout=5.0,
+            )
+            assert status == 302
+            location = _get_location(hdrs)
+            assert location == f"{APP_PREFIX}/rtsp/10.0.0.1:1554/iptv/live"
+        finally:
+            r2h.stop()
+            upstream.stop()
+
+    @pytest.mark.parametrize(
+        "upstream_location, expected",
+        [
+            ("rtp://239.0.0.1:1234", "/rtp/239.0.0.1:1234"),
+            ("rtp://239.0.0.1:1234?fcc=10.0.0.2:8027", "/rtp/239.0.0.1:1234?fcc=10.0.0.2:8027"),
+            ("udp://239.0.0.1:1234", "/udp/239.0.0.1:1234"),
+            ("udp://239.0.0.1:1234?fec=1235", "/udp/239.0.0.1:1234?fec=1235"),
+        ],
+    )
+    def test_302_m3u_scheme_location_rewritten(self, shared_r2h, upstream_location, expected):
+        """M3U-recognized rtp:// and udp:// Locations rewrite onto /rtp/ and /udp/."""
+        upstream = MockHTTPUpstream(
+            routes={
+                "/catchup": {
+                    "status": 302,
+                    "body": b"",
+                    "headers": {"Location": upstream_location},
+                },
+            }
+        )
+        upstream.start()
+        try:
+            status, hdrs, _ = http_get(
+                "127.0.0.1",
+                shared_r2h.port,
+                f"/http/127.0.0.1:{upstream.port}/catchup",
+                timeout=5.0,
+            )
+            assert status == 302
+            assert _get_location(hdrs) == expected
+        finally:
+            upstream.stop()
+
+    def test_302_relative_location_kept_unchanged(self, shared_r2h):
+        """Root-relative Location such as /rtsp/... must be forwarded as-is."""
+        upstream = MockHTTPUpstream(
+            routes={
+                "/catchup": {
+                    "status": 302,
+                    "body": b"",
+                    "headers": {"Location": "/rtsp/10.0.0.1:1554/iptv/live?auth=token123"},
+                },
+            }
+        )
+        upstream.start()
+        try:
+            status, hdrs, _ = http_get(
+                "127.0.0.1",
+                shared_r2h.port,
+                f"/http/127.0.0.1:{upstream.port}/catchup",
+                timeout=5.0,
+            )
+            assert status == 302
+            location = _get_location(hdrs)
+            assert location == "/rtsp/10.0.0.1:1554/iptv/live?auth=token123"
+        finally:
+            upstream.stop()
+
+    @pytest.mark.rtsp
+    def test_302_rtsp_location_rewritten_and_playable(self, shared_r2h):
+        """HTTP 302 to rtsp:// should rewrite to /rtsp/... and the client can play it."""
+        rtsp = MockRTSPServer(num_packets=50)
+        rtsp.start()
+        try:
+            rtsp_url = f"rtsp://127.0.0.1:{rtsp.port}/iptv/live?auth=token123"
+            expected = f"/rtsp/127.0.0.1:{rtsp.port}/iptv/live?auth=token123"
+            upstream = MockHTTPUpstream(
+                routes={
+                    "/catchup": {
+                        "status": 302,
+                        "body": b"",
+                        "headers": {"Location": rtsp_url},
+                    },
+                }
+            )
+            upstream.start()
+            try:
+                status, hdrs, _ = http_get(
+                    "127.0.0.1",
+                    shared_r2h.port,
+                    f"/http/127.0.0.1:{upstream.port}/catchup",
+                    timeout=5.0,
+                )
+                assert status == 302
+                location = _get_location(hdrs)
+                assert location is not None, "Location header missing"
+                assert location == expected
+
+                stream_status, _, body = stream_get(
+                    "127.0.0.1",
+                    shared_r2h.port,
+                    location,
+                    read_bytes=4096,
+                    timeout=20.0,
+                )
+                assert stream_status == 200
+                assert len(body) > 0, "Expected RTSP stream after following rewritten Location"
+            finally:
+                upstream.stop()
+        finally:
+            rtsp.stop()
+
+    @pytest.mark.rtsp
+    def test_302_relative_rtsp_location_playable(self, shared_r2h):
+        """HTTP 302 to /rtsp/... should be forwarded unchanged and remain playable."""
+        rtsp = MockRTSPServer(num_packets=50)
+        rtsp.start()
+        try:
+            expected = f"/rtsp/127.0.0.1:{rtsp.port}/iptv/live?auth=token123"
+            upstream = MockHTTPUpstream(
+                routes={
+                    "/catchup": {
+                        "status": 302,
+                        "body": b"",
+                        "headers": {"Location": expected},
+                    },
+                }
+            )
+            upstream.start()
+            try:
+                status, hdrs, _ = http_get(
+                    "127.0.0.1",
+                    shared_r2h.port,
+                    f"/http/127.0.0.1:{upstream.port}/catchup",
+                    timeout=5.0,
+                )
+                assert status == 302
+                location = _get_location(hdrs)
+                assert location is not None, "Location header missing"
+                assert location == expected
+
+                stream_status, _, body = stream_get(
+                    "127.0.0.1",
+                    shared_r2h.port,
+                    location,
+                    read_bytes=4096,
+                    timeout=20.0,
+                )
+                assert stream_status == 200
+                assert len(body) > 0, "Expected RTSP stream after following relative Location"
+            finally:
+                upstream.stop()
+        finally:
+            rtsp.stop()
+
+    @pytest.mark.multicast
+    def test_302_rtp_location_rewritten_and_playable(self, r2h_binary):
+        """HTTP 302 to rtp:// should rewrite to /rtp/... and the client can play it."""
+        port = find_free_port()
+        r2h = R2HProcess(r2h_binary, port, extra_args=["-v", "4", "-m", "100", "-r", LOOPBACK_IF])
+        mcast_port = find_free_udp_port()
+        sender = MulticastSender(addr=MCAST_ADDR, port=mcast_port, pps=200)
+        rtp_url = f"rtp://{MCAST_ADDR}:{mcast_port}"
+        expected = f"/rtp/{MCAST_ADDR}:{mcast_port}"
+        upstream = MockHTTPUpstream(
+            routes={
+                "/live": {
+                    "status": 302,
+                    "body": b"",
+                    "headers": {"Location": rtp_url},
+                },
+            }
+        )
+        sender.start()
+        upstream.start()
+        try:
+            r2h.start()
+            status, hdrs, _ = http_get(
+                "127.0.0.1",
+                port,
+                f"/http/127.0.0.1:{upstream.port}/live",
+                timeout=5.0,
+            )
+            assert status == 302
+            location = _get_location(hdrs)
+            assert location is not None, "Location header missing"
+            assert location == expected
+
+            stream_status, _, body = stream_get(
+                "127.0.0.1",
+                port,
+                location,
+                read_bytes=4096,
+                timeout=10.0,
+            )
+            assert stream_status == 200
+            assert len(body) > 0, "Expected multicast stream after following rewritten Location"
+        finally:
+            r2h.stop()
+            upstream.stop()
+            sender.stop()
+
+    def test_relative_location_does_not_log_http_scheme_error(self, r2h_binary):
+        """Relative Location must not be logged as 'URL must start with http://'."""
+        port = find_free_port()
+        r2h = R2HProcess(r2h_binary, port, extra_args=["-v", "4", "-m", "5"])
+        upstream = MockHTTPUpstream(
+            routes={
+                "/catchup": {
+                    "status": 302,
+                    "body": b"",
+                    "headers": {"Location": "/rtsp/example"},
+                },
+            }
+        )
+        upstream.start()
+        try:
+            r2h.start()
+            status, hdrs, _ = http_get(
+                "127.0.0.1",
+                port,
+                f"/http/127.0.0.1:{upstream.port}/catchup",
+                timeout=5.0,
+            )
+            assert status == 302
+            assert _get_location(hdrs) == "/rtsp/example"
+            log = r2h.read_log()
+            assert "URL must start with http://" not in log
+        finally:
+            r2h.stop()
             upstream.stop()
 
 
@@ -547,7 +860,7 @@ class TestProxyEmptyBody:
             status, _, body = http_get(
                 "127.0.0.1",
                 shared_r2h.port,
-                "/http/127.0.0.1:%d/empty" % upstream.port,
+                f"/http/127.0.0.1:{upstream.port}/empty",
                 timeout=5.0,
             )
             assert status == 200

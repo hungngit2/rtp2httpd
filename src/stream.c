@@ -23,7 +23,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define STREAM_METADATA_HEADERS_SIZE 1024
+#define STREAM_METADATA_HEADERS_SIZE 1536
 #define TS_PACKET_SIZE 188
 #define TS_SYNC_BYTE 0x47
 
@@ -132,7 +132,7 @@ static int stream_metadata_format_number(double value, char *buffer, size_t buff
   return 0;
 }
 
-static int stream_payload_is_mpegts(const uint8_t *payload, int payload_len) {
+int stream_payload_is_mpegts(const uint8_t *payload, int payload_len) {
   int checked = 0;
 
   if (!payload || payload_len < TS_PACKET_SIZE || payload[0] != TS_SYNC_BYTE)
@@ -181,8 +181,8 @@ void stream_metadata_forget(stream_metadata_t *metadata, unsigned stages) {
   }
 }
 
-static void stream_metadata_note_media(stream_context_t *ctx, int packet_type, const uint8_t *payload, int payload_len,
-                                       stream_media_origin_t origin) {
+void stream_metadata_note_media(stream_context_t *ctx, int packet_type, const uint8_t *payload, int payload_len,
+                                stream_media_origin_t origin) {
   stream_metadata_t *metadata;
 
   if (!ctx || ctx->metadata.frozen || !stream_payload_is_mpegts(payload, payload_len))
@@ -198,6 +198,35 @@ static void stream_metadata_note_media(stream_context_t *ctx, int packet_type, c
       metadata->fcc_status = STREAM_FCC_STATUS_FALLBACK;
     }
   }
+}
+
+static int stream_append_download_filename_header(connection_t *conn, char *headers, size_t headers_size,
+                                                  size_t *length) {
+  const char *query;
+  char raw[768];
+  char sanitized[HTTP_DOWNLOAD_FILENAME_MAX + 8];
+  char line[768];
+
+  if (!conn || !conn->http_req)
+    return 0;
+
+  query = strchr(conn->http_req->url, '?');
+  if (!query)
+    return 0;
+  if (http_parse_query_param(query + 1, "r2h-filename", raw, sizeof(raw)) != 0)
+    return 0;
+  if (raw[0] == '\0')
+    return 0;
+  if (http_sanitize_download_filename(raw, sanitized, sizeof(sanitized)) != 0)
+    return 0;
+  if (http_build_content_disposition_header(sanitized, line, sizeof(line)) < 0)
+    return 0;
+  /* Omit the download name rather than dropping the rest of the metadata. */
+  if (stream_metadata_append_raw(headers, headers_size, length, line) < 0) {
+    logger(LOG_DEBUG, "Stream: Content-Disposition header omitted (buffer full)");
+    return 0;
+  }
+  return 0;
 }
 
 void stream_send_http_headers(connection_t *conn, const char *content_type, const char *extra_headers) {
@@ -216,6 +245,9 @@ void stream_send_http_headers(connection_t *conn, const char *content_type, cons
 
   if (extra_headers && extra_headers[0])
     failed |= stream_metadata_append_raw(headers, sizeof(headers), &length, extra_headers) < 0;
+
+  if (content_type && strcmp(content_type, "video/mp2t") == 0)
+    stream_append_download_filename_header(conn, headers, sizeof(headers), &length);
 
   failed |= stream_metadata_append_enum(headers, sizeof(headers), &length, STREAM_HDR_UPSTREAM_PROTOCOL,
                                         stream_upstream_protocol_values, ARRAY_SIZE(stream_upstream_protocol_values),
@@ -265,6 +297,10 @@ void stream_send_http_headers(connection_t *conn, const char *content_type, cons
     send_http_headers(conn, STATUS_200, content_type, headers);
   }
   metadata->frozen = 1;
+  /* Routing may still be on the stack for synchronous HEAD responses.
+   * HTTP proxy sessions borrow raw headers and the request body. */
+  if (conn->state == CONN_STREAMING && !conn->stream.http_proxy)
+    connection_release_request(conn);
 }
 
 void stream_on_client_drain(stream_context_t *ctx) {
@@ -275,10 +311,10 @@ void stream_on_client_drain(stream_context_t *ctx) {
   if (!connection_can_resume_upstream(ctx->conn))
     return;
   /* Resume functions are no-ops if not paused; no need to re-check here. */
-  if (ctx->http_proxy.initialized)
-    http_proxy_resume_upstream(&ctx->http_proxy);
-  if (ctx->rtsp.initialized)
-    rtsp_resume_upstream(&ctx->rtsp);
+  if (ctx->http_proxy && ctx->http_proxy->initialized)
+    http_proxy_resume_upstream(ctx->http_proxy);
+  if (ctx->rtsp && ctx->rtsp->initialized)
+    rtsp_resume_upstream(ctx->rtsp);
 }
 
 int stream_process_rtp_payload(stream_context_t *ctx, buffer_ref_t *buf_ref, stream_media_origin_t origin) {
@@ -303,7 +339,20 @@ int stream_process_rtp_payload(stream_context_t *ctx, buffer_ref_t *buf_ref, str
   stream_metadata_note_media(ctx, pkt_type, payload, payload_len, origin);
 
   if (pkt_type == 0) {
-    /* Non-RTP packet - pass through directly (no reordering needed) */
+    /* Non-RTP packet.  The only legitimate case is an upstream that sends bare
+     * MPEG-TS over UDP (RTSP servers negotiating plain MP2T, raw TS multicast
+     * streams), so anything that is not TS is a stray datagram: a ZTE
+     * ZXV10STB NAT punch reply landing on the media port, an RTCP report sent
+     * to the wrong port, or an unrelated sender - the media sockets are
+     * unconnected and accept from anyone.  Splicing such a datagram into the
+     * output breaks the 188-byte TS alignment for the rest of the stream,
+     * which strict demuxers (mpegts.js) never recover from. */
+    if (!stream_payload_is_mpegts(payload, payload_len)) {
+      logger(LOG_DEBUG, "Stream: Dropped %d-byte datagram that is neither RTP nor MPEG-TS", payload_len);
+      return 0;
+    }
+
+    /* Bare MPEG-TS - pass through directly (no reordering needed) */
     if (ctx->snapshot.initialized) {
       return snapshot_process_packet(&ctx->snapshot, buf_ref->data_size, data_ptr, ctx->conn);
     }
@@ -333,8 +382,8 @@ int stream_handle_fd_event(stream_context_t *ctx, int fd, uint32_t events, int64
   }
 
   /* Process multicast socket events */
-  if (ctx->mcast.initialized && ctx->mcast.sock >= 0 && fd == ctx->mcast.sock) {
-    return mcast_session_handle_event(&ctx->mcast, ctx, now);
+  if (ctx->mcast.initialized && fd >= 0 && (fd == ctx->mcast.sock || fd == ctx->mcast.fec_sock)) {
+    return mcast_session_handle_event(&ctx->mcast, fd, now);
   }
 
   /* Process FEC socket events - drain all available packets for
@@ -351,12 +400,12 @@ int stream_handle_fd_event(stream_context_t *ctx, int fd, uint32_t events, int64
   }
 
   /* Process RTSP socket events */
-  if (ctx->rtsp.initialized && ctx->rtsp.socket >= 0 && fd == ctx->rtsp.socket) {
+  if ((ctx->rtsp && ctx->rtsp->initialized) && ctx->rtsp->socket >= 0 && fd == ctx->rtsp->socket) {
     /* Handle RTSP socket events (handshake and RTP data in PLAYING state) */
-    int result = rtsp_handle_socket_event(&ctx->rtsp, events);
+    int result = rtsp_handle_socket_event(ctx->rtsp, events);
     if (result < 0) {
       if (result == STREAM_EVENT_DURATION_READY) {
-        logger(LOG_DEBUG, "RTSP: found duration: %0.3f", ctx->rtsp.r2h_duration_value);
+        logger(LOG_DEBUG, "RTSP: found duration: %0.3f", ctx->rtsp->r2h_duration_value);
         return STREAM_EVENT_DURATION_READY;
       }
       if (result == STREAM_EVENT_METADATA_READY) {
@@ -368,8 +417,8 @@ int stream_handle_fd_event(stream_context_t *ctx, int fd, uint32_t events, int64
   }
 
   /* Process RTSP RTP socket events (UDP mode) */
-  if (ctx->rtsp.initialized && ctx->rtsp.rtp_socket >= 0 && fd == ctx->rtsp.rtp_socket) {
-    int result = rtsp_handle_udp_rtp_data(&ctx->rtsp, ctx->conn);
+  if ((ctx->rtsp && ctx->rtsp->initialized) && ctx->rtsp->rtp_socket >= 0 && fd == ctx->rtsp->rtp_socket) {
+    int result = rtsp_handle_udp_rtp_data(ctx->rtsp, ctx->conn);
     if (result < 0) {
       return -1; /* Error */
     }
@@ -378,18 +427,19 @@ int stream_handle_fd_event(stream_context_t *ctx, int fd, uint32_t events, int64
 
   /* Handle UDP RTCP socket - drain all available packets for
    * edge-triggered pollers (epoll EPOLLET / kqueue EV_CLEAR). */
-  if (ctx->rtsp.initialized && ctx->rtsp.rtcp_socket >= 0 && fd == ctx->rtsp.rtcp_socket) {
+  if ((ctx->rtsp && ctx->rtsp->initialized) && ctx->rtsp->rtcp_socket >= 0 && fd == ctx->rtsp->rtcp_socket) {
     /* RTCP data processing could be added here in the future */
     /* For now, just consume all data to prevent buffer overflow */
     uint8_t rtcp_buffer[RTCP_BUFFER_SIZE];
-    while (recv(ctx->rtsp.rtcp_socket, rtcp_buffer, sizeof(rtcp_buffer), 0) > 0)
+    while (recv(ctx->rtsp->rtcp_socket, rtcp_buffer, sizeof(rtcp_buffer), 0) > 0)
       ;
     return 0;
   }
 
   /* Process HTTP proxy socket events */
-  if (ctx->http_proxy.initialized && ctx->http_proxy.socket >= 0 && fd == ctx->http_proxy.socket) {
-    int result = http_proxy_handle_socket_event(&ctx->http_proxy, events);
+  if ((ctx->http_proxy && ctx->http_proxy->initialized) && ctx->http_proxy->socket >= 0 &&
+      fd == ctx->http_proxy->socket) {
+    int result = http_proxy_handle_socket_event(ctx->http_proxy, events);
     if (result < 0) {
       logger(LOG_ERROR, "HTTP Proxy: Socket event handling failed");
       return -1;
@@ -405,12 +455,15 @@ static int stream_init_rtsp_control(stream_context_t *ctx, service_t *service, i
   const char *resolved_seek_param_name = service->seek_param_name;
   char resolved_rtsp_url[2048];
 
-  rtsp_session_init(&ctx->rtsp);
-  ctx->rtsp.status_index = status_index;
-  ctx->rtsp.epoll_fd = ctx->epoll_fd;
-  ctx->rtsp.conn = ctx->conn;
-  ctx->rtsp.metadata_probe = metadata_probe;
-  ctx->rtsp.upstream_ifname = get_upstream_interface_for_rtsp(service->ifname);
+  ctx->rtsp = calloc(1, sizeof(*ctx->rtsp));
+  if (!ctx->rtsp)
+    return -1;
+  rtsp_session_init(ctx->rtsp);
+  ctx->rtsp->status_index = status_index;
+  ctx->rtsp->epoll_fd = ctx->epoll_fd;
+  ctx->rtsp->conn = ctx->conn;
+  ctx->rtsp->metadata_probe = metadata_probe;
+  ctx->rtsp->upstream_ifname = get_upstream_interface_for_rtsp(service->ifname);
 
   if (!service->rtsp_url) {
     logger(LOG_ERROR, "RTSP URL not found in service configuration");
@@ -425,9 +478,9 @@ static int stream_init_rtsp_control(stream_context_t *ctx, service_t *service, i
     return -1;
   }
 
-  if (service_format_recent_seek_range(&seek_parse_result, ctx->rtsp.playseek_range_start,
-                                       sizeof(ctx->rtsp.playseek_range_start)) > 0) {
-    ctx->rtsp.use_playseek_range = 1;
+  if (service_format_recent_seek_range(&seek_parse_result, ctx->rtsp->playseek_range_start,
+                                       sizeof(ctx->rtsp->playseek_range_start)) > 0) {
+    ctx->rtsp->use_playseek_range = 1;
     resolved_seek_param_name = NULL;
   }
 
@@ -436,16 +489,16 @@ static int stream_init_rtsp_control(stream_context_t *ctx, service_t *service, i
     logger(LOG_ERROR, "RTSP: Failed to resolve upstream URL");
     return -1;
   }
-  if (rtsp_parse_server_url(&ctx->rtsp, resolved_rtsp_url, NULL, NULL) < 0) {
+  if (rtsp_parse_server_url(ctx->rtsp, resolved_rtsp_url, NULL, NULL) < 0) {
     logger(LOG_ERROR, "RTSP: Failed to parse URL");
     return -1;
   }
-  if (rtsp_connect(&ctx->rtsp) < 0) {
+  if (rtsp_connect(ctx->rtsp) < 0) {
     logger(LOG_ERROR, "RTSP: Failed to initiate connection");
     return -1;
   }
 
-  logger(LOG_DEBUG, "RTSP: Async connection initiated, state=%d", ctx->rtsp.state);
+  logger(LOG_DEBUG, "RTSP: Async connection initiated, state=%d", ctx->rtsp->state);
   return 0;
 }
 
@@ -484,11 +537,14 @@ int stream_context_init_for_worker(stream_context_t *ctx, connection_t *conn, se
     seek_parse_result_t seek_parse_result;
 
     /* Snapshot mode is not supported for HTTP proxy - ignore is_snapshot */
-    http_proxy_session_init(&ctx->http_proxy);
-    ctx->http_proxy.epoll_fd = ctx->epoll_fd;
-    ctx->http_proxy.conn = conn;
-    ctx->http_proxy.status_index = status_index;
-    ctx->http_proxy.upstream_ifname = get_upstream_interface_for_http(service->ifname);
+    ctx->http_proxy = calloc(1, sizeof(*ctx->http_proxy));
+    if (!ctx->http_proxy)
+      return -1;
+    http_proxy_session_init(ctx->http_proxy);
+    ctx->http_proxy->epoll_fd = ctx->epoll_fd;
+    ctx->http_proxy->conn = conn;
+    ctx->http_proxy->status_index = status_index;
+    ctx->http_proxy->upstream_ifname = get_upstream_interface_for_http(service->ifname);
 
     if (!service->http_url) {
       logger(LOG_ERROR, "HTTP URL not found in service configuration");
@@ -512,28 +568,28 @@ int stream_context_init_for_worker(stream_context_t *ctx, connection_t *conn, se
     }
 
     /* Parse URL */
-    if (http_proxy_parse_url(&ctx->http_proxy, proxy_url) < 0) {
+    if (http_proxy_parse_url(ctx->http_proxy, proxy_url) < 0) {
       logger(LOG_ERROR, "HTTP Proxy: Failed to parse URL");
       return -1;
     }
 
     /* Set HTTP method from client request */
-    http_proxy_set_method(&ctx->http_proxy, conn->http_req.method);
+    http_proxy_set_method(ctx->http_proxy, conn->http_req->method);
 
     /* Set raw headers for full passthrough */
-    http_proxy_set_raw_headers(&ctx->http_proxy, conn->http_req.raw_headers, conn->http_req.raw_headers_len);
+    http_proxy_set_raw_headers(ctx->http_proxy, conn->http_req->raw_headers, conn->http_req->raw_headers_len);
 
     /* Set request body for passthrough */
-    if (conn->http_req.body && conn->http_req.body_len > 0) {
-      http_proxy_set_request_body(&ctx->http_proxy, conn->http_req.body, conn->http_req.body_len);
+    if (conn->http_req->body && conn->http_req->body_len > 0) {
+      http_proxy_set_request_body(ctx->http_proxy, conn->http_req->body, conn->http_req->body_len);
     }
 
     /* Set request headers for base URL construction during content rewriting */
-    http_proxy_set_request_headers(&ctx->http_proxy, conn->http_req.hostname, conn->http_req.x_forwarded_host,
-                                   conn->http_req.x_forwarded_proto);
+    http_proxy_set_request_headers(ctx->http_proxy, conn->http_req->hostname, conn->http_req->x_forwarded_host,
+                                   conn->http_req->x_forwarded_proto);
 
     /* Initiate connection */
-    if (http_proxy_connect(&ctx->http_proxy) < 0) {
+    if (http_proxy_connect(ctx->http_proxy) < 0) {
       logger(LOG_ERROR, "HTTP Proxy: Failed to initiate connection");
       return -1;
     }
@@ -554,8 +610,10 @@ int stream_context_init_for_worker(stream_context_t *ctx, connection_t *conn, se
       }
     }
 
-    /* Initialize RTP reorder and FEC (common to all RTP-based services) */
-    if (rtp_reorder_init(&ctx->reorder, service->fec_port > 0) < 0) {
+    /* RTSP and FCC can receive private media before joining multicast.
+     * Multicast decides at attachment whether a private window is needed. */
+    if ((service->service_type == SERVICE_RTSP || service->fcc_addr) &&
+        rtp_reorder_init(&ctx->reorder, service->fec_port > 0) < 0) {
       logger(LOG_ERROR, "Failed to initialize RTP reorder buffer");
       return -1;
     }
@@ -602,7 +660,7 @@ int stream_tick(stream_context_t *ctx, int64_t now) {
     return 0;
 
   /* Multicast session tick (rejoin and timeout checks) */
-  if (mcast_session_tick(&ctx->mcast, ctx->service, now) < 0) {
+  if (mcast_session_tick(&ctx->mcast, now) < 0) {
     return -1; /* Multicast timeout */
   }
 
@@ -610,11 +668,11 @@ int stream_tick(stream_context_t *ctx, int64_t now) {
   fcc_session_tick(ctx, now);
 
   /* RTSP session tick (STUN timeout, keepalive, state timeout) */
-  if (rtsp_session_tick(&ctx->rtsp, now) < 0)
+  if (rtsp_session_tick(ctx->rtsp, now) < 0)
     return -1;
 
   /* HTTP proxy session tick (state timeout) */
-  if (http_proxy_session_tick(&ctx->http_proxy, now) < 0)
+  if (http_proxy_session_tick(ctx->http_proxy, now) < 0)
     return -1;
 
   /* Check snapshot timeout (5 seconds) */
@@ -650,6 +708,15 @@ int stream_tick(stream_context_t *ctx, int64_t now) {
   return 0; /* Success */
 }
 
+void stream_context_destroy(stream_context_t *ctx) {
+  if (!ctx)
+    return;
+
+  /* Final destruction cannot leave async work referencing the connection. */
+  rtsp_force_cleanup(ctx->rtsp);
+  stream_context_cleanup(ctx);
+}
+
 int stream_context_cleanup(stream_context_t *ctx) {
   if (!ctx)
     return 0;
@@ -661,13 +728,15 @@ int stream_context_cleanup(stream_context_t *ctx) {
   fcc_session_cleanup(&ctx->fcc, ctx->service, ctx->epoll_fd);
 
   /* Clean up multicast session */
-  mcast_session_cleanup(&ctx->mcast, ctx->epoll_fd);
+  mcast_session_cleanup(&ctx->mcast);
 
   /* Clean up HTTP proxy session (always synchronous) */
-  http_proxy_session_cleanup(&ctx->http_proxy);
+  http_proxy_session_cleanup(ctx->http_proxy);
+  free(ctx->http_proxy);
+  ctx->http_proxy = NULL;
 
   /* Clean up RTSP session - this may initiate async TEARDOWN */
-  int rtsp_async = rtsp_session_cleanup(&ctx->rtsp);
+  int rtsp_async = rtsp_session_cleanup(ctx->rtsp);
 
   /* Clean up FEC context (fec_cleanup owns the socket cleanup) */
   fec_cleanup(&ctx->fec, ctx->epoll_fd);
@@ -681,6 +750,8 @@ int stream_context_cleanup(stream_context_t *ctx) {
     /* Do NOT clear ctx->service - still needed for RTSP */
     return 1; /* Indicate async cleanup in progress */
   }
+  free(ctx->rtsp);
+  ctx->rtsp = NULL;
 
   /* NOTE: Do NOT free ctx->service here!
    * The service pointer is shared with the parent connection (c->service).

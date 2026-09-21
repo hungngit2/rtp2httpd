@@ -3,7 +3,7 @@
 #include "configuration.h"
 #include "connection.h"
 #include "http.h"
-#include "md5.h"
+#include "http_headers.h"
 #include "multicast.h"
 #include "platform_compat.h"
 #include "poller.h"
@@ -11,12 +11,15 @@
 #include "status.h"
 #include "stream.h"
 #include "utils.h"
+#include "vendor/md5/md5.h"
 #include "worker.h"
+#include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
 #include <math.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,20 +49,21 @@ static int rtsp_prepare_request(rtsp_session_t *session, const char *method, con
                                 const char *extra_headers);
 static int rtsp_try_send_pending(rtsp_session_t *session);
 static int rtsp_try_receive_response(rtsp_session_t *session);
-static int rtsp_parse_response_header(rtsp_session_t *session, const char *response, size_t *response_offset,
-                                      size_t *response_len);
+static int rtsp_parse_response_header(rtsp_session_t *session, const char *response, size_t response_buflen,
+                                      size_t *response_offset, size_t *response_len, struct phr_header *headers,
+                                      size_t *num_headers);
 static int rtsp_setup_udp_sockets(rtsp_session_t *session);
 static void rtsp_close_udp_sockets(rtsp_session_t *session, const char *reason);
-static char *rtsp_find_header(const char *response, const char *header_name);
 static void rtsp_parse_transport_header(rtsp_session_t *session, const char *transport);
 static void rtsp_send_udp_nat_probe(rtsp_session_t *session);
+static int rtsp_capture_control_endpoints(rtsp_session_t *session);
 static int rtsp_process_interleaved_buffer(rtsp_session_t *session, connection_t *conn);
 static int rtsp_handle_redirect(rtsp_session_t *session, const char *location);
-static void rtsp_parse_describe_sdp(rtsp_session_t *session, const char *header_start, const char *sdp_body);
-static void rtsp_parse_play_metadata(rtsp_session_t *session, const char *response);
+static void rtsp_parse_describe_sdp(rtsp_session_t *session, const struct phr_header *headers, size_t num_headers,
+                                    const char *sdp_body);
+static void rtsp_parse_play_metadata(rtsp_session_t *session, const struct phr_header *headers, size_t num_headers);
 static int rtsp_initiate_teardown(rtsp_session_t *session);
 static int rtsp_reconnect_for_teardown(rtsp_session_t *session);
-static void rtsp_force_cleanup(rtsp_session_t *session);
 static int rtsp_base64_encode(const uint8_t *input, size_t input_len, char *output, size_t output_size);
 static int rtsp_parse_www_authenticate(rtsp_session_t *session, const char *www_auth_header);
 static void rtsp_build_digest_response(rtsp_session_t *session, const char *method, const char *uri, char *response_out,
@@ -300,6 +304,13 @@ void rtsp_session_init(rtsp_session_t *session) {
   session->metadata_probe = 0;
   session->peer_closed = 0;
   session->connect_generation = 0;
+  session->control_local_ip4.s_addr = INADDR_ANY;
+  session->control_peer_ip4.s_addr = INADDR_ANY;
+  session->control_local_ip[0] = '\0';
+  session->control_local_port = 0;
+  session->control_endpoints_valid = 0;
+  session->zte_nat_active = 0;
+  session->describe_waiting_for_stun = 0;
 
   /* Initialize transport parameters - mode will be negotiated during SETUP */
   session->transport_mode = RTSP_TRANSPORT_TCP;    /* Default preference */
@@ -739,6 +750,77 @@ static void rtsp_free_connect_results(rtsp_session_t *session) {
   }
 }
 
+static int rtsp_capture_control_endpoints(rtsp_session_t *session) {
+  struct sockaddr_storage local_addr;
+  struct sockaddr_storage peer_addr;
+  socklen_t local_len = sizeof(local_addr);
+  socklen_t peer_len = sizeof(peer_addr);
+  char local_host[INET6_ADDRSTRLEN];
+  struct in_addr local_ip4;
+  struct in_addr peer_ip4;
+  int local_ip_changed;
+
+  memset(&local_addr, 0, sizeof(local_addr));
+  memset(&peer_addr, 0, sizeof(peer_addr));
+  local_ip4.s_addr = INADDR_ANY;
+  peer_ip4.s_addr = INADDR_ANY;
+
+  if (getsockname(session->socket, (struct sockaddr *)&local_addr, &local_len) < 0) {
+    logger(LOG_ERROR, "RTSP: getsockname() failed: %s", strerror(errno));
+    goto fail;
+  }
+  if (getpeername(session->socket, (struct sockaddr *)&peer_addr, &peer_len) < 0) {
+    logger(LOG_ERROR, "RTSP: getpeername() failed: %s", strerror(errno));
+    goto fail;
+  }
+  if (sockaddr_format_ip((struct sockaddr *)&local_addr, local_host, sizeof(local_host)) < 0) {
+    logger(LOG_ERROR, "RTSP: Failed to format local control endpoint");
+    goto fail;
+  }
+
+  if (local_addr.ss_family == AF_INET)
+    local_ip4 = ((const struct sockaddr_in *)&local_addr)->sin_addr;
+  if (peer_addr.ss_family == AF_INET)
+    peer_ip4 = ((const struct sockaddr_in *)&peer_addr)->sin_addr;
+
+  /* A reconnect or redirect can land on a different local address; UDP sockets
+   * pinned to the previous one must be recreated before SETUP. */
+  local_ip_changed = session->control_endpoints_valid && session->control_local_ip4.s_addr != local_ip4.s_addr;
+  if (local_ip_changed && session->rtp_socket >= 0)
+    rtsp_close_udp_sockets(session, "control connection local address changed");
+
+  session->control_local_ip4 = local_ip4;
+  session->control_peer_ip4 = peer_ip4;
+  snprintf(session->control_local_ip, sizeof(session->control_local_ip), "%s", local_host);
+  session->control_local_port = sockaddr_get_port((struct sockaddr *)&local_addr);
+  session->control_endpoints_valid = 1;
+  /* The ZTE NAT traversal behaviours (x-NAT header, client_address parameter,
+   * ZXV10STB punch packet) all encode an IPv4 address, so they are limited to
+   * IPv4 control connections.  IPv6 upstreams fall back to plain negotiation. */
+  session->zte_nat_active = local_addr.ss_family == AF_INET && peer_addr.ss_family == AF_INET;
+
+  logger(LOG_INFO, "RTSP: Upstream interface %s, local endpoint %s:%u",
+         session->upstream_ifname && session->upstream_ifname[0] ? session->upstream_ifname : "route-selected",
+         session->control_local_ip, session->control_local_port);
+
+#ifdef __FreeBSD__
+  if (session->upstream_ifname && session->upstream_ifname[0])
+    logger(LOG_DEBUG,
+           "RTSP: FreeBSD cannot reliably pin unicast sockets to upstream interface %s; using the actual "
+           "route-selected local endpoint",
+           session->upstream_ifname);
+#endif
+  if (!session->zte_nat_active)
+    logger(LOG_DEBUG, "RTSP: IPv6 control connection, skipping ZTE NAT traversal headers and punch packet");
+
+  return 0;
+
+fail:
+  session->control_endpoints_valid = 0;
+  session->zte_nat_active = 0;
+  return -1;
+}
+
 /**
  * Try connecting to the next candidate from the getaddrinfo result list
  * (sequential dual-stack fallback, IPv6/IPv4 in resolver order).
@@ -920,8 +1002,7 @@ static int rtsp_handle_terminal_socket_event(rtsp_session_t *session, uint32_t e
     rtsp_force_cleanup(session);
     if (session->conn && session->conn->state != CONN_CLOSING) {
       session->conn->state = CONN_CLOSING;
-      connection_epoll_update_events(session->conn->epfd, session->conn->fd,
-                                     POLLER_IN | POLLER_OUT | POLLER_RDHUP | POLLER_HUP | POLLER_ERR);
+      connection_schedule_write(session->conn);
     }
     return STREAM_EVENT_OK;
   }
@@ -963,6 +1044,7 @@ int rtsp_handle_socket_event(rtsp_session_t *session, uint32_t events) {
     /* Connection succeeded - drop remaining candidates */
     rtsp_free_connect_results(session);
     logger(LOG_INFO, "RTSP: Connected to %s:%d", session->server_host, session->server_port);
+    rtsp_capture_control_endpoints(session);
 
     /* Update poller to monitor both read and write */
     if (session->epoll_fd >= 0) {
@@ -999,10 +1081,11 @@ int rtsp_handle_socket_event(rtsp_session_t *session, uint32_t events) {
    * with a response outstanding, drain it first: a peer can deliver its final
    * response and EOF in a single edge-triggered event, and that response may be
    * exactly what completes the exchange (RTSP HEAD probes routinely see the
-   * DESCRIBE response and FIN together).  The read path below reports the
-   * close through this same helper once the response has been parsed. */
+   * DESCRIBE response and FIN together).  During TCP playback, final media
+   * must likewise be drained before closing the upstream. */
   else if ((events & (POLLER_HUP | POLLER_ERR | POLLER_RDHUP)) &&
-           !(session->awaiting_response && (events & POLLER_IN))) {
+           !((events & POLLER_IN) && (session->awaiting_response || (session->state == RTSP_STATE_PLAYING &&
+                                                                     session->transport_mode == RTSP_TRANSPORT_TCP)))) {
     return rtsp_handle_terminal_socket_event(session, events);
   }
 
@@ -1064,13 +1147,15 @@ int rtsp_handle_socket_event(rtsp_session_t *session, uint32_t events) {
       }
 
       /* The response that arrived with the close (if any) has now been parsed.
-       * Terminal successes returned above; everything else still needs a live
-       * connection, so honour the close now instead of letting the session wait
-       * for a reply that can never come.  A response that replaced the control
-       * connection (redirect, TEARDOWN reconnect) is exempt: the close belonged
-       * to the connection we just walked away from. */
+       * Terminal successes returned above. TCP playback falls through to drain
+       * media preserved after PLAY/keepalive and still queued in the socket.
+       * Other states need a live connection, so honour the close now instead
+       * of waiting for a reply that can never come. A response that replaced
+       * the control connection (redirect, TEARDOWN reconnect) is exempt: the
+       * close belonged to the connection we just walked away from. */
       if (session->connect_generation == connect_generation &&
-          (session->peer_closed || (events & (POLLER_HUP | POLLER_ERR | POLLER_RDHUP)))) {
+          (session->peer_closed || (events & (POLLER_HUP | POLLER_ERR | POLLER_RDHUP))) &&
+          !(session->state == RTSP_STATE_PLAYING && session->transport_mode == RTSP_TRANSPORT_TCP)) {
         return rtsp_handle_terminal_socket_event(session, events);
       }
 
@@ -1084,7 +1169,8 @@ int rtsp_handle_socket_event(rtsp_session_t *session, uint32_t events) {
         }
       }
 
-      if (response_result == RTSP_RESPONSE_KEEPALIVE) {
+      if (response_result == RTSP_RESPONSE_KEEPALIVE &&
+          !(session->peer_closed || (events & (POLLER_HUP | POLLER_ERR | POLLER_RDHUP)))) {
         /* For TCP mode, process any preserved interleaved data in buffer
          * (without recv - just drain what's already buffered) */
         if (session->transport_mode == RTSP_TRANSPORT_TCP && session->response_buffer_pos > 0 && session->conn) {
@@ -1134,8 +1220,7 @@ int rtsp_handle_socket_event(rtsp_session_t *session, uint32_t events) {
         rtsp_force_cleanup(session);
         if (session->conn && session->conn->state != CONN_CLOSING) {
           session->conn->state = CONN_CLOSING;
-          connection_epoll_update_events(session->conn->epfd, session->conn->fd,
-                                         POLLER_IN | POLLER_OUT | POLLER_RDHUP | POLLER_HUP | POLLER_ERR);
+          connection_schedule_write(session->conn);
         }
         return 0;
       }
@@ -1387,9 +1472,9 @@ static int rtsp_try_receive_response(rtsp_session_t *session) {
     }
   }
 
-  /* NUL-terminate for strstr-based parsing. Clamp to buffer bounds since
-   * rtsp_handle_tcp_interleaved_data() can fill buffer to full capacity
-   * (response_buffer_pos == RTSP_RESPONSE_BUFFER_SIZE) before keepalive. */
+  /* NUL-terminate so SDP/text helpers can still use C-string scans. Clamp to
+   * buffer bounds since rtsp_handle_tcp_interleaved_data() can fill the buffer
+   * to full capacity before keepalive. */
   size_t nul_pos = session->response_buffer_pos;
   if (nul_pos >= sizeof(session->response_buffer))
     nul_pos = sizeof(session->response_buffer) - 1;
@@ -1399,9 +1484,11 @@ static int rtsp_try_receive_response(rtsp_session_t *session) {
    * completeness) */
   size_t response_offset = 0;
   size_t response_len = 0;
+  struct phr_header resp_hdrs[HTTP_HEADERS_MAX];
+  size_t resp_num_headers = 0;
   int was_keepalive = session->awaiting_keepalive_response;
-  int parse_result =
-      rtsp_parse_response_header(session, (const char *)session->response_buffer, &response_offset, &response_len);
+  int parse_result = rtsp_parse_response_header(session, (const char *)session->response_buffer, nul_pos,
+                                                &response_offset, &response_len, resp_hdrs, &resp_num_headers);
 
   if (parse_result == 1) {
     if (session->peer_closed) {
@@ -1488,13 +1575,10 @@ static int rtsp_try_receive_response(rtsp_session_t *session) {
      * would remain in the buffer and block interleaved data processing. */
     size_t body_skip = 0;
     if (remaining_data_len > 0) {
-      char *cl_header = rtsp_find_header((const char *)session->response_buffer + response_offset, "Content-Length");
-      if (cl_header) {
-        size_t content_length = (size_t)atoi(cl_header);
-        free(cl_header);
-        if (content_length > 0 && content_length <= remaining_data_len) {
-          body_skip = content_length;
-        }
+      long cl = 0;
+      if (http_headers_get_long(resp_hdrs, resp_num_headers, "Content-Length", &cl) == 0 && cl > 0 &&
+          (size_t)cl <= remaining_data_len) {
+        body_skip = (size_t)cl;
       }
     }
 
@@ -1532,7 +1616,7 @@ static int rtsp_try_receive_response(rtsp_session_t *session) {
     return RTSP_RESPONSE_ADVANCE;
   }
   if (session->state == RTSP_STATE_AWAITING_DESCRIBE) {
-    rtsp_parse_describe_sdp(session, (const char *)session->response_buffer + response_offset,
+    rtsp_parse_describe_sdp(session, resp_hdrs, resp_num_headers,
                             (const char *)session->response_buffer + response_offset + response_len);
     /* HEAD metadata probes always stop after DESCRIBE, even when the URL also
      * contains the legacy r2h-duration query parameter.  Neither terminal case
@@ -1582,8 +1666,127 @@ static int rtsp_try_receive_response(rtsp_session_t *session) {
   return RTSP_RESPONSE_OK;
 }
 
+/*
+ * Resolve the endpoint advertised to the upstream server for NAT traversal.
+ *
+ * When STUN discovery succeeded, its public mapping wins: that is the address
+ * an upstream behind NAT can actually reach.  Otherwise the RTSP control
+ * connection's own local endpoint is used, which is the correct answer when
+ * rtp2httpd itself holds the operator-facing address (the usual router
+ * deployment).
+ *
+ * Note that STUN discovers the mapping of the *UDP* socket; RTSP has no way to
+ * discover the TCP control port's mapping, so `control_port` (what the x-NAT
+ * header names) falls back to the STUN UDP port when STUN is in play.
+ */
+static void rtsp_nat_endpoint(const rtsp_session_t *session, rtsp_nat_endpoint_t *out) {
+  uint16_t stun_port = stun_get_mapped_port(&session->stun);
+  struct in_addr stun_ip = stun_get_mapped_ipv4(&session->stun);
+
+  memset(out, 0, sizeof(*out));
+
+  if (stun_port > 0) {
+    out->rtp_port = stun_port;
+    out->rtcp_port = stun_port + 1;
+    out->control_port = stun_port;
+  } else {
+    out->rtp_port = (uint16_t)session->local_rtp_port;
+    out->rtcp_port = (uint16_t)session->local_rtcp_port;
+    out->control_port = session->control_local_port;
+  }
+
+  if (stun_ip.s_addr != INADDR_ANY) {
+    out->ip4 = stun_ip;
+    inet_ntop(AF_INET, &out->ip4, out->ip, sizeof(out->ip));
+  } else {
+    out->ip4 = session->control_local_ip4;
+    snprintf(out->ip, sizeof(out->ip), "%s", session->control_local_ip);
+  }
+}
+
+/*
+ * Append a formatted chunk to a header buffer, keeping *len in sync.  Writes
+ * are clamped to the buffer so callers can chain appends without repeating the
+ * remaining-space arithmetic.
+ */
+static void rtsp_append_header(char *buf, size_t size, size_t *len, const char *fmt, ...)
+    __attribute__((format(printf, 4, 5)));
+
+static void rtsp_append_header(char *buf, size_t size, size_t *len, const char *fmt, ...) {
+  va_list args;
+  int written;
+
+  if (*len + 1 >= size)
+    return;
+
+  va_start(args, fmt);
+  written = vsnprintf(buf + *len, size - *len, fmt, args);
+  va_end(args);
+
+  if (written < 0)
+    return;
+  *len += (size_t)written;
+  if (*len >= size)
+    *len = size - 1;
+}
+
+/*
+ * Append the ZTE "x-NAT: <ip>:<port>" header naming the endpoint the server
+ * should treat as ours.  No-op on IPv6 control connections.
+ */
+static void rtsp_append_x_nat_header(const rtsp_session_t *session, char *buf, size_t size, size_t *len) {
+  rtsp_nat_endpoint_t nat;
+
+  if (!session->zte_nat_active)
+    return;
+  rtsp_nat_endpoint(session, &nat);
+  rtsp_append_header(buf, size, len, "x-NAT: %s:%u\r\n", nat.ip, nat.control_port);
+}
+
+/*
+ * Build the SETUP "Transport:" header.  Every supported alternative is listed
+ * in preference order (TCP interleaved first, then UDP) so a server that
+ * cannot serve one can still select another; the punch packet is only sent
+ * once the server has actually confirmed UDP.  The UDP alternatives carry
+ * client_address/mode=PLAY, matching what ZTE ZXV10 set-top boxes send.
+ */
+static void rtsp_build_setup_transport(const rtsp_session_t *session, char *buf, size_t size, size_t *len,
+                                       int offer_tcp, int offer_udp, int rtp_port, int rtcp_port) {
+  static const char *const tcp_profiles[] = {"MP2T/RTP/TCP", "MP2T/TCP", "RTP/AVP/TCP"};
+  static const char *const udp_profiles[] = {"MP2T/RTP/UDP", "MP2T/UDP", "RTP/AVP"};
+  char udp_address[sizeof("client_address=;") + INET6_ADDRSTRLEN] = "";
+  const char *udp_mode = "";
+  const char *separator = "";
+  size_t i;
+
+  if (session->zte_nat_active) {
+    rtsp_nat_endpoint_t nat;
+    rtsp_nat_endpoint(session, &nat);
+    snprintf(udp_address, sizeof(udp_address), "client_address=%s;", nat.ip);
+    udp_mode = ";mode=PLAY";
+  }
+
+  rtsp_append_header(buf, size, len, "Transport: ");
+  if (offer_tcp) {
+    for (i = 0; i < ARRAY_SIZE(tcp_profiles); i++) {
+      rtsp_append_header(buf, size, len, "%s%s;unicast;interleaved=%d-%d", separator, tcp_profiles[i],
+                         session->rtp_channel, session->rtcp_channel);
+      separator = ",";
+    }
+  }
+  if (offer_udp) {
+    for (i = 0; i < ARRAY_SIZE(udp_profiles); i++) {
+      rtsp_append_header(buf, size, len, "%s%s;unicast;%sclient_port=%d-%d%s", separator, udp_profiles[i], udp_address,
+                         rtp_port, rtcp_port, udp_mode);
+      separator = ",";
+    }
+  }
+  rtsp_append_header(buf, size, len, "\r\n");
+}
+
 int rtsp_state_machine_advance(rtsp_session_t *session) {
   char extra_headers[RTSP_HEADERS_BUFFER_SIZE];
+  size_t headers_len = 0;
 
   switch (session->state) {
   case RTSP_STATE_CONNECTED:
@@ -1598,8 +1801,25 @@ int rtsp_state_machine_advance(rtsp_session_t *session) {
     return 0;
 
   case RTSP_STATE_AWAITING_OPTIONS:
-    /* OPTIONS response received, ready to send DESCRIBE */
-    snprintf(extra_headers, sizeof(extra_headers), "Accept: application/sdp\r\n");
+    /* OPTIONS response received, ready to send DESCRIBE.
+     * DESCRIBE already carries the x-NAT header, so a STUN discovery started
+     * back at connect() has to finish first - otherwise x-NAT would name the
+     * private endpoint while SETUP later advertises the public mapping.
+     * STUN is bounded by its own retry budget, and rtsp_session_tick() pauses
+     * the handshake timeout while it runs. */
+    if (session->stun.in_progress) {
+      stun_check_timeout(&session->stun, session->rtp_socket);
+      if (session->stun.in_progress) {
+        session->describe_waiting_for_stun = 1;
+        logger(LOG_DEBUG, "RTSP: Waiting for STUN response before sending DESCRIBE");
+        return 0; /* Stay in AWAITING_OPTIONS, will be called again */
+      }
+    }
+    session->describe_waiting_for_stun = 0;
+
+    extra_headers[0] = '\0';
+    rtsp_append_header(extra_headers, sizeof(extra_headers), &headers_len, "Accept: application/sdp\r\n");
+    rtsp_append_x_nat_header(session, extra_headers, sizeof(extra_headers), &headers_len);
     if (rtsp_prepare_request(session, RTSP_METHOD_DESCRIBE, NULL, extra_headers) < 0) {
       logger(LOG_ERROR, "RTSP: Failed to prepare DESCRIBE request");
       return -1;
@@ -1611,7 +1831,7 @@ int rtsp_state_machine_advance(rtsp_session_t *session) {
   case RTSP_STATE_DESCRIBED: {
     /* Ready to send SETUP - first setup UDP sockets if needed */
     int udp_setup_ok = 0;
-    int advertised_rtp_port, advertised_rtcp_port;
+    int advertised_rtp_port = 0, advertised_rtcp_port = 0;
 
     /* Check if UDP sockets were already created for STUN */
     if (session->rtp_socket >= 0) {
@@ -1620,61 +1840,25 @@ int rtsp_state_machine_advance(rtsp_session_t *session) {
       udp_setup_ok = 1;
     }
 
-    if (!udp_setup_ok) {
-      logger(LOG_DEBUG, "RTSP: Failed to setup UDP sockets, will only offer TCP transport");
-      snprintf(extra_headers, sizeof(extra_headers),
-               "Transport: MP2T/RTP/TCP;unicast;interleaved=%d-%d,"
-               "MP2T/TCP;unicast;interleaved=%d-%d,"
-               "RTP/AVP/TCP;unicast;interleaved=%d-%d\r\n",
-               session->rtp_channel, session->rtcp_channel, session->rtp_channel, session->rtcp_channel,
-               session->rtp_channel, session->rtcp_channel);
-    } else {
-      /* Check STUN status and determine which port to advertise */
-      if (session->stun.in_progress) {
-        /* STUN still in progress - check for timeout/retry */
-        stun_check_timeout(&session->stun, session->rtp_socket);
-
-        /* If STUN is still in progress after timeout check, wait for it */
-        if (session->stun.in_progress) {
-          logger(LOG_DEBUG, "RTSP: Waiting for STUN response before sending SETUP");
-          return 0; /* Stay in DESCRIBED state, will be called again */
-        }
-      }
-
-      /* Use STUN mapped port if available, otherwise use local port */
-      advertised_rtp_port = stun_get_mapped_port(&session->stun);
-      if (advertised_rtp_port > 0) {
-        advertised_rtcp_port = advertised_rtp_port + 1;
+    /* STUN, if any, already settled before DESCRIBE was sent */
+    if (udp_setup_ok) {
+      rtsp_nat_endpoint_t nat;
+      rtsp_nat_endpoint(session, &nat);
+      advertised_rtp_port = nat.rtp_port;
+      advertised_rtcp_port = nat.rtcp_port;
+      if (stun_get_mapped_port(&session->stun) > 0)
         logger(LOG_DEBUG, "RTSP: Using STUN mapped ports %d-%d for SETUP Transport", advertised_rtp_port,
                advertised_rtcp_port);
-      } else {
-        advertised_rtp_port = session->local_rtp_port;
-        advertised_rtcp_port = session->local_rtcp_port;
-        if (config.rtsp_stun_server && config.rtsp_stun_server[0] != '\0') {
-          logger(LOG_DEBUG, "RTSP: STUN timed out, using local ports %d-%d", advertised_rtp_port, advertised_rtcp_port);
-        }
-      }
-
-      if (RTSP_DISABLE_TCP_TRANSPORT) {
-        snprintf(extra_headers, sizeof(extra_headers),
-                 "Transport: MP2T/RTP/UDP;unicast;client_port=%d-%d,"
-                 "MP2T/UDP;unicast;client_port=%d-%d,"
-                 "RTP/AVP;unicast;client_port=%d-%d\r\n",
-                 advertised_rtp_port, advertised_rtcp_port, advertised_rtp_port, advertised_rtcp_port,
-                 advertised_rtp_port, advertised_rtcp_port);
-      } else {
-        snprintf(extra_headers, sizeof(extra_headers),
-                 "Transport: MP2T/RTP/TCP;unicast;interleaved=%d-%d,"
-                 "MP2T/TCP;unicast;interleaved=%d-%d,"
-                 "RTP/AVP/TCP;unicast;interleaved=%d-%d,"
-                 "MP2T/RTP/UDP;unicast;client_port=%d-%d,"
-                 "MP2T/UDP;unicast;client_port=%d-%d,"
-                 "RTP/AVP;unicast;client_port=%d-%d\r\n",
-                 session->rtp_channel, session->rtcp_channel, session->rtp_channel, session->rtcp_channel,
-                 session->rtp_channel, session->rtcp_channel, advertised_rtp_port, advertised_rtcp_port,
-                 advertised_rtp_port, advertised_rtcp_port, advertised_rtp_port, advertised_rtcp_port);
-      }
+    } else {
+      logger(LOG_DEBUG, "RTSP: Failed to setup UDP sockets, will only offer TCP transport");
     }
+
+    extra_headers[0] = '\0';
+    rtsp_build_setup_transport(session, extra_headers, sizeof(extra_headers), &headers_len,
+                               !udp_setup_ok || !RTSP_DISABLE_TCP_TRANSPORT, udp_setup_ok, advertised_rtp_port,
+                               advertised_rtcp_port);
+    rtsp_append_x_nat_header(session, extra_headers, sizeof(extra_headers), &headers_len);
+
     if (rtsp_prepare_request(session, RTSP_METHOD_SETUP, session->setup_url[0] ? session->setup_url : NULL,
                              extra_headers) < 0) {
       logger(LOG_ERROR, "RTSP: Failed to prepare SETUP request");
@@ -1746,6 +1930,13 @@ int rtsp_session_tick(rtsp_session_t *session, int64_t now) {
     switch (session->state) {
     case RTSP_STATE_CONNECTING:
     case RTSP_STATE_AWAITING_OPTIONS:
+      /* DESCRIBE is deliberately held back until STUN settles; STUN has its own
+       * bounded retry budget, so don't also count it against the handshake. */
+      if (session->describe_waiting_for_stun)
+        timeout_sec = 0;
+      else
+        timeout_sec = RTSP_HANDSHAKE_TIMEOUT_SEC;
+      break;
     case RTSP_STATE_AWAITING_DESCRIBE:
     case RTSP_STATE_AWAITING_SETUP:
     case RTSP_STATE_AWAITING_PLAY:
@@ -1780,12 +1971,12 @@ int rtsp_session_tick(rtsp_session_t *session, int64_t now) {
   }
 
   /* Check STUN timeout if waiting for STUN response */
-  if (session->stun.in_progress && session->state == RTSP_STATE_DESCRIBED) {
+  if (session->stun.in_progress && session->describe_waiting_for_stun) {
     if (stun_check_timeout(&session->stun, session->rtp_socket) > 0) {
-      /* STUN finally timed out, advance state machine to continue with local
-       * port */
+      /* STUN finally timed out, advance state machine to continue with the
+       * local endpoint */
       if (rtsp_state_machine_advance(session) == 0) {
-        /* Re-arm POLLER_OUT so the pending SETUP request gets sent */
+        /* Re-arm POLLER_OUT so the pending DESCRIBE request gets sent */
         if (session->epoll_fd >= 0) {
           poller_mod(session->epoll_fd, session->socket,
                      POLLER_IN | POLLER_OUT | POLLER_HUP | POLLER_ERR | POLLER_RDHUP);
@@ -1887,7 +2078,7 @@ static int rtsp_process_interleaved_buffer(rtsp_session_t *session, connection_t
       break; /* Wait for more data */
     }
 
-    /* Sanity check: bound against the zero-copy destination buffer. */
+    /* Sanity check: bound against the destination pool buffer. */
     if (packet_length > BUFFER_POOL_BUFFER_SIZE) {
       logger(LOG_ERROR,
              "RTSP: Received packet too large (%d bytes, max %d), attempting "
@@ -1959,6 +2150,7 @@ int rtsp_handle_tcp_interleaved_data(rtsp_session_t *session, connection_t *conn
     }
 
     int hit_eagain = 0;
+    int upstream_closed = 0;
 
     /* Fill response buffer from socket */
     while (session->response_buffer_pos < RTSP_RESPONSE_BUFFER_SIZE) {
@@ -1970,10 +2162,12 @@ int rtsp_handle_tcp_interleaved_data(rtsp_session_t *session, connection_t *conn
           break; /* No more data available */
         }
         logger(LOG_ERROR, "RTSP: TCP receive failed: %s", strerror(errno));
-        return -1; /* Upstream gone — caller will drain client */
+        upstream_closed = 1;
+        break;
       } else if (bytes_received == 0) {
         logger(LOG_INFO, "RTSP: Server closed connection (EOF received)");
-        return -1; /* EOF — caller will drain client */
+        upstream_closed = 1;
+        break;
       }
 
       session->response_buffer_pos += bytes_received;
@@ -1984,6 +2178,11 @@ int rtsp_handle_tcp_interleaved_data(rtsp_session_t *session, connection_t *conn
     if (result < 0)
       return result;
     total_forwarded += result;
+
+    /* recv can report EOF after filling only part of the buffer. Forward
+     * those final complete frames before the caller drains client output. */
+    if (upstream_closed)
+      return -1;
 
     /* If we hit EAGAIN, socket is fully drained */
     if (hit_eagain)
@@ -2013,9 +2212,9 @@ int rtsp_handle_udp_rtp_data(rtsp_session_t *session, connection_t *conn) {
         if (stun_parse_response(&session->stun, stun_buf, stun_len) == 0) {
           logger(LOG_INFO, "RTSP: STUN discovery completed, mapped RTP port: %d", stun_get_mapped_port(&session->stun));
           /* If state machine was waiting for STUN, advance it now */
-          if (session->state == RTSP_STATE_DESCRIBED) {
+          if (session->describe_waiting_for_stun) {
             if (rtsp_state_machine_advance(session) == 0) {
-              /* Re-arm POLLER_OUT so the pending SETUP request gets sent */
+              /* Re-arm POLLER_OUT so the pending DESCRIBE request gets sent */
               if (session->epoll_fd >= 0) {
                 poller_mod(session->epoll_fd, session->socket,
                            POLLER_IN | POLLER_OUT | POLLER_HUP | POLLER_ERR | POLLER_RDHUP);
@@ -2043,7 +2242,7 @@ int rtsp_handle_udp_rtp_data(rtsp_session_t *session, connection_t *conn) {
       return total_bytes_written;
     }
 
-    /* Receive directly into zero-copy buffer (true zero-copy receive) */
+    /* Receive directly into a pool buffer for the send queue */
     int bytes_received = recv(session->rtp_socket, rtp_buf->data, BUFFER_POOL_BUFFER_SIZE, 0);
     if (bytes_received < 0) {
       buffer_ref_put(rtp_buf);
@@ -2076,7 +2275,10 @@ int rtsp_handle_udp_rtp_data(rtsp_session_t *session, connection_t *conn) {
  * Force cleanup - immediately close all sockets and reset session
  * Used when TEARDOWN cannot be sent or after TEARDOWN completes
  */
-static void rtsp_force_cleanup(rtsp_session_t *session) {
+void rtsp_force_cleanup(rtsp_session_t *session) {
+  if (!session || !session->initialized)
+    return;
+
   /* Close and remove RTSP control socket from poller */
   if (session->socket >= 0) {
     worker_cleanup_socket_from_epoll(session->epoll_fd, session->socket);
@@ -2199,7 +2401,7 @@ static int rtsp_initiate_teardown(rtsp_session_t *session) {
 
 int rtsp_session_cleanup(rtsp_session_t *session) {
   /* Skip cleanup if session was never initialized */
-  if (!session->initialized) {
+  if (!session || !session->initialized) {
     return 0; /* Nothing to clean up */
   }
 
@@ -2273,59 +2475,124 @@ int rtsp_session_cleanup(rtsp_session_t *session) {
 }
 
 /* Helper functions */
-static int rtsp_parse_response_header(rtsp_session_t *session, const char *response, size_t *response_offset,
-                                      size_t *response_len) {
-  char *session_header = NULL;
+static const char *rtsp_find_mem(const char *hay, size_t hay_len, const char *needle, size_t needle_len) {
+  if (!hay || !needle || hay_len < needle_len)
+    return NULL;
+  for (size_t i = 0; i + needle_len <= hay_len; i++) {
+    if (memcmp(hay + i, needle, needle_len) == 0)
+      return hay + i;
+  }
+  return NULL;
+}
+
+/* Parse an RTSP/1.0 status line plus headers. buf must start at "RTSP/1.0".
+ * @return 1 complete, 0 need more data, -1 parse error */
+static int rtsp_parse_status_and_headers(const char *buf, size_t len, int *status_out, struct phr_header *headers,
+                                         size_t *num_headers, size_t *consumed) {
+  const char *newline;
+  const char *line_end;
+  const char *p;
+  size_t status_line_len;
+  unsigned status = 0;
+  int digits = 0;
+  int pret;
+
+  if (!buf || !status_out || !headers || !num_headers || !consumed)
+    return -1;
+
+  if (len < 8)
+    return 0;
+  if (memcmp(buf, "RTSP/1.0", 8) != 0)
+    return -1;
+
+  newline = memchr(buf, '\n', len);
+  if (!newline)
+    return 0;
+
+  line_end = newline;
+  if (line_end > buf && *(line_end - 1) == '\r')
+    line_end--;
+
+  p = buf + 8;
+  if (p >= line_end || (*p != ' ' && *p != '\t'))
+    return -1;
+  while (p < line_end && (*p == ' ' || *p == '\t'))
+    p++;
+
+  while (p < line_end && *p >= '0' && *p <= '9') {
+    if (digits >= 3)
+      return -1;
+    status = status * 10u + (unsigned)(*p - '0');
+    digits++;
+    p++;
+  }
+  if (digits != 3 || status < 100 || status > 999)
+    return -1;
+
+  status_line_len = (size_t)(newline - buf) + 1;
+  pret = phr_parse_headers(buf + status_line_len, len - status_line_len, headers, num_headers);
+  if (pret == -2)
+    return 0;
+  if (pret < 0)
+    return -1;
+
+  *status_out = (int)status;
+  *consumed = status_line_len + (size_t)pret;
+  return 1;
+}
+
+static int rtsp_parse_response_header(rtsp_session_t *session, const char *response, size_t response_buflen,
+                                      size_t *response_offset, size_t *response_len, struct phr_header *headers,
+                                      size_t *num_headers) {
   char *transport_header = NULL;
   char *location_header = NULL;
-  char *public_header = NULL;
-  int status_code;
+  const char *rtsp_start;
+  size_t remain;
+  size_t consumed = 0;
+  int status_code = 0;
+  int parse_result;
   int result = 0;
+
+  if (!headers || !num_headers)
+    return -1;
+
+  *num_headers = 0;
 
   /* Locate RTSP response start (skip any TCP interleaved data before it)
    * TCP interleaved data packets start with '$', RTSP responses start with
    * "RTSP/1.0" */
-  const char *rtsp_start = strstr(response, "RTSP/1.0");
+  rtsp_start = rtsp_find_mem(response, response_buflen, "RTSP/1.0", 8);
   if (!rtsp_start) {
-    /* No RTSP response found yet - might be only interleaved data or incomplete
-     */
     *response_offset = 0;
     *response_len = 0;
     return 1; /* Need more data */
   }
 
-  /* Check if we have a complete RTSP response (ends with \r\n\r\n) */
-  const char *response_end = strstr(rtsp_start, "\r\n\r\n");
-  if (!response_end) {
-    /* Incomplete RTSP response - need more data */
-    *response_offset = rtsp_start - response;
+  *response_offset = (size_t)(rtsp_start - response);
+  remain = response_buflen - *response_offset;
+  *num_headers = HTTP_HEADERS_MAX;
+  parse_result = rtsp_parse_status_and_headers(rtsp_start, remain, &status_code, headers, num_headers, &consumed);
+  if (parse_result == 0) {
+    *num_headers = 0;
     *response_len = 0;
     return 1; /* Need more data */
   }
-
-  /* Calculate response offset and length (including \r\n\r\n) */
-  *response_offset = rtsp_start - response;
-  *response_len = (response_end - rtsp_start) + 4;
-
-  /* Parse status line */
-  if (sscanf(rtsp_start, "RTSP/1.0 %d", &status_code) != 1) {
+  if (parse_result < 0) {
+    *num_headers = 0;
     logger(LOG_ERROR, "RTSP: Invalid response format");
-    result = -1;
-    goto cleanup;
+    return -1;
   }
+
+  *response_len = consumed;
 
   /* If Content-Length is present, ensure the full body has arrived before
    * declaring the response complete.  This is critical for DESCRIBE responses
    * whose SDP body must be available when rtsp_parse_describe_sdp() runs. */
   if (status_code == 200) {
-    char *cl = rtsp_find_header(rtsp_start, "Content-Length");
-    if (cl) {
-      size_t content_length = (size_t)atoi(cl);
-      free(cl);
-      size_t total_needed = *response_offset + *response_len + content_length;
-      size_t buffered = strlen(response);
-      if (buffered < total_needed) {
-        /* Body not fully received yet */
+    long cl = 0;
+    if (http_headers_get_long(headers, *num_headers, "Content-Length", &cl) == 0 && cl > 0) {
+      size_t total_needed = *response_offset + *response_len + (size_t)cl;
+      if (response_buflen < total_needed) {
         *response_len = 0;
         return 1; /* Need more data */
       }
@@ -2334,10 +2601,9 @@ static int rtsp_parse_response_header(rtsp_session_t *session, const char *respo
 
   /* Handle different status code ranges */
   if (status_code >= 300 && status_code < 400) {
-    /* Redirection response */
     logger(LOG_DEBUG, "RTSP: Received redirect response %d", status_code);
 
-    location_header = rtsp_find_header(rtsp_start, "Location");
+    location_header = http_headers_dup(headers, *num_headers, "Location");
     if (!location_header) {
       logger(LOG_ERROR, "RTSP: Redirect response missing Location header");
       result = -1;
@@ -2345,28 +2611,25 @@ static int rtsp_parse_response_header(rtsp_session_t *session, const char *respo
     }
 
     result = rtsp_handle_redirect(session, location_header);
-    /* Note: result can be 1 (success), 2 (async), or -1 (failure) */
     goto cleanup;
   } else if (status_code == 401) {
-    /* Authentication required */
+    char *www_auth_header;
+
     logger(LOG_DEBUG, "RTSP: Server requires authentication (401)");
 
-    /* Prevent infinite auth retry loops */
     if (session->auth_retry_count >= 2) {
       logger(LOG_ERROR, "RTSP: Authentication failed after %d retries", session->auth_retry_count);
       result = -1;
       goto cleanup;
     }
 
-    /* Extract WWW-Authenticate header */
-    char *www_auth_header = rtsp_find_header(rtsp_start, "WWW-Authenticate");
+    www_auth_header = http_headers_dup(headers, *num_headers, "WWW-Authenticate");
     if (!www_auth_header) {
       logger(LOG_ERROR, "RTSP: 401 response missing WWW-Authenticate header");
       result = -1;
       goto cleanup;
     }
 
-    /* Parse authentication challenge */
     if (rtsp_parse_www_authenticate(session, www_auth_header) != 0) {
       logger(LOG_ERROR, "RTSP: Failed to parse WWW-Authenticate header");
       free(www_auth_header);
@@ -2375,18 +2638,14 @@ static int rtsp_parse_response_header(rtsp_session_t *session, const char *respo
     }
     free(www_auth_header);
 
-    /* Check if we have credentials */
     if (session->username[0] == '\0') {
       logger(LOG_ERROR, "RTSP: Authentication required but no credentials provided");
       result = -1;
       goto cleanup;
     }
 
-    /* Increment retry counter */
     session->auth_retry_count++;
 
-    /* The request about to be retried will answer these fields again; drop the
-     * unauthenticated attempt's answers so a failed retry cannot report them. */
     if (session->state == RTSP_STATE_AWAITING_DESCRIBE) {
       stream_metadata_forget(rtsp_metadata(session), STREAM_METADATA_STAGE_DESCRIBE);
     } else if (session->state == RTSP_STATE_AWAITING_SETUP) {
@@ -2395,11 +2654,10 @@ static int rtsp_parse_response_header(rtsp_session_t *session, const char *respo
       stream_metadata_forget(rtsp_metadata(session), STREAM_METADATA_STAGE_PLAY);
     }
 
-    /* Move state back to retry the same request */
     if (session->state == RTSP_STATE_AWAITING_OPTIONS) {
       rtsp_session_set_state(session, RTSP_STATE_CONNECTED);
     } else if (session->state == RTSP_STATE_AWAITING_DESCRIBE) {
-      rtsp_session_set_state(session, RTSP_STATE_AWAITING_OPTIONS); /* Will advance to DESCRIBED */
+      rtsp_session_set_state(session, RTSP_STATE_AWAITING_OPTIONS);
     } else if (session->state == RTSP_STATE_AWAITING_SETUP) {
       rtsp_session_set_state(session, RTSP_STATE_DESCRIBED);
     } else if (session->state == RTSP_STATE_AWAITING_PLAY) {
@@ -2409,10 +2667,9 @@ static int rtsp_parse_response_header(rtsp_session_t *session, const char *respo
     logger(LOG_DEBUG, "RTSP: Retrying request with %s authentication",
            session->auth_type == RTSP_AUTH_DIGEST ? "Digest" : "Basic");
 
-    result = 0; /* Return success to allow state machine to retry */
+    result = 0;
     goto cleanup;
   } else if (status_code != 200) {
-    /* Check if this is a GET_PARAMETER not supported error during keepalive */
     if ((status_code == 454 || status_code == 501) && session->awaiting_keepalive_response &&
         session->use_get_parameter) {
       logger(LOG_DEBUG,
@@ -2421,7 +2678,7 @@ static int rtsp_parse_response_header(rtsp_session_t *session, const char *respo
              status_code);
       session->use_get_parameter = 0;
       session->awaiting_keepalive_response = 0;
-      result = 0; /* Treat as success, will use OPTIONS next time */
+      result = 0;
       goto cleanup;
     }
 
@@ -2431,15 +2688,13 @@ static int rtsp_parse_response_header(rtsp_session_t *session, const char *respo
   }
 
   if (session->state == RTSP_STATE_AWAITING_PLAY) {
-    rtsp_parse_play_metadata(session, rtsp_start);
+    rtsp_parse_play_metadata(session, headers, *num_headers);
   }
 
-  /* Parse Public header from OPTIONS response to determine supported methods */
   if (session->state == RTSP_STATE_AWAITING_OPTIONS) {
-    public_header = rtsp_find_header(rtsp_start, "Public");
+    const struct phr_header *public_header = http_headers_find(headers, *num_headers, "Public");
     if (public_header) {
-      /* Check if GET_PARAMETER is supported */
-      if (strstr(public_header, "GET_PARAMETER")) {
+      if (rtsp_find_mem(public_header->value, public_header->value_len, "GET_PARAMETER", sizeof("GET_PARAMETER") - 1)) {
         session->use_get_parameter = 1;
         logger(LOG_DEBUG, "RTSP: Server supports GET_PARAMETER for keepalive");
       } else {
@@ -2447,26 +2702,20 @@ static int rtsp_parse_response_header(rtsp_session_t *session, const char *respo
         logger(LOG_DEBUG, "RTSP: Server does not advertise GET_PARAMETER, will "
                           "use OPTIONS for keepalive");
       }
-      logger(LOG_DEBUG, "RTSP: Server advertised methods: %s", public_header);
+      logger(LOG_DEBUG, "RTSP: Server advertised methods: %.*s", (int)public_header->value_len, public_header->value);
     } else {
-      /* No Public header - try GET_PARAMETER anyway, fallback on error */
       logger(LOG_DEBUG, "RTSP: No Public header in OPTIONS response, will try "
                         "GET_PARAMETER with fallback");
     }
   }
 
-  /* Extract Session header if present */
-  session_header = rtsp_find_header(rtsp_start, "Session");
-  if (session_header) {
-    char *semicolon = strchr(session_header, ';');
+  if (http_headers_copy(headers, *num_headers, "Session", session->session_id, sizeof(session->session_id)) == 0) {
+    char *semicolon = strchr(session->session_id, ';');
     if (semicolon)
-      *semicolon = '\0'; /* Remove timeout info */
-    strncpy(session->session_id, session_header, sizeof(session->session_id) - 1);
-    session->session_id[sizeof(session->session_id) - 1] = '\0';
+      *semicolon = '\0';
   }
 
-  /* Extract Transport header if present */
-  transport_header = rtsp_find_header(rtsp_start, "Transport");
+  transport_header = http_headers_dup(headers, *num_headers, "Transport");
   if (transport_header) {
     rtsp_parse_transport_header(session, transport_header);
   }
@@ -2474,15 +2723,10 @@ static int rtsp_parse_response_header(rtsp_session_t *session, const char *respo
   result = 0;
 
 cleanup:
-  /* Free all allocated headers */
-  if (session_header)
-    free(session_header);
   if (transport_header)
     free(transport_header);
   if (location_header)
     free(location_header);
-  if (public_header)
-    free(public_header);
 
   return result;
 }
@@ -2542,7 +2786,10 @@ static int rtsp_setup_udp_sockets(rtsp_session_t *session) {
   } else {
     struct sockaddr_in *sin = (struct sockaddr_in *)&local_addr;
     sin->sin_family = AF_INET;
-    sin->sin_addr.s_addr = INADDR_ANY;
+    /* ZTE mode pins the media sockets to the same local address the RTSP
+     * control connection uses, since that address is what the x-NAT header and
+     * the punch packet advertise to the server. */
+    sin->sin_addr.s_addr = session->zte_nat_active ? session->control_local_ip4.s_addr : INADDR_ANY;
     local_addr_len = sizeof(struct sockaddr_in);
   }
 
@@ -2661,7 +2908,8 @@ static int rtsp_setup_udp_sockets(rtsp_session_t *session) {
     logger(LOG_DEBUG, "RTSP: RTCP socket registered with poller");
   }
 
-  logger(LOG_DEBUG, "RTSP: UDP sockets bound to ports %d (RTP) and %d (RTCP)", session->local_rtp_port,
+  logger(LOG_DEBUG, "RTSP: UDP sockets bound to %s ports %d (RTP) and %d (RTCP)",
+         session->zte_nat_active ? session->control_local_ip : "any address", session->local_rtp_port,
          session->local_rtcp_port);
 
   return 0;
@@ -2694,99 +2942,47 @@ static void rtsp_close_udp_sockets(rtsp_session_t *session, const char *reason) 
   session->server_source_addr[0] = '\0';
 }
 
-static char *rtsp_find_header(const char *response, const char *header_name) {
-  const char *line;
-  size_t header_name_len;
-
-  if (!response || !header_name)
-    return NULL;
-
-  line = strstr(response, "\r\n");
-  if (!line)
-    return NULL;
-  line += 2;
-  header_name_len = strlen(header_name);
-
-  while (*line != '\0') {
-    const char *line_end = strstr(line, "\r\n");
-    const char *colon;
-    const char *value_start;
-    const char *value_end;
-    size_t value_len;
-    char *result;
-
-    if (!line_end || line_end == line)
-      return NULL;
-
-    colon = memchr(line, ':', (size_t)(line_end - line));
-    if (!colon || (size_t)(colon - line) != header_name_len || strncasecmp(line, header_name, header_name_len) != 0) {
-      line = line_end + 2;
-      continue;
-    }
-
-    value_start = colon + 1;
-    while (value_start < line_end && (*value_start == ' ' || *value_start == '\t'))
-      value_start++;
-    value_end = line_end;
-    while (value_end > value_start && (value_end[-1] == ' ' || value_end[-1] == '\t'))
-      value_end--;
-
-    value_len = (size_t)(value_end - value_start);
-    result = malloc(value_len + 1);
-    if (!result) {
-      logger(LOG_ERROR, "RTSP: Failed to allocate memory for header");
-      return NULL;
-    }
-    memcpy(result, value_start, value_len);
-    result[value_len] = '\0';
-    return result;
-  }
-
-  return NULL;
-}
-
-static void rtsp_parse_play_metadata(rtsp_session_t *session, const char *response) {
+static void rtsp_parse_play_metadata(rtsp_session_t *session, const struct phr_header *headers, size_t num_headers) {
   stream_metadata_t *metadata;
-  char *scale_header;
-  char *range_header;
+  const struct phr_header *scale_header;
+  const struct phr_header *range_header;
 
-  if (!response)
+  if (!headers)
     return;
 
   metadata = rtsp_metadata(session);
   if (!metadata)
     return;
 
-  scale_header = rtsp_find_header(response, "Scale");
-  if (scale_header) {
+  scale_header = http_headers_find(headers, num_headers, "Scale");
+  if (scale_header && scale_header->value_len > 0 && scale_header->value_len < 64) {
+    char scale_buf[64];
     char *end = NULL;
     double scale;
 
+    http_headers_copy_token(scale_buf, sizeof(scale_buf), scale_header->value, scale_header->value_len);
     errno = 0;
-    scale = strtod(scale_header, &end);
+    scale = strtod(scale_buf, &end);
     while (end && (*end == ' ' || *end == '\t'))
       end++;
-    if (end != scale_header && end && *end == '\0' && errno != ERANGE && isfinite(scale)) {
+    if (end != scale_buf && end && *end == '\0' && errno != ERANGE && isfinite(scale)) {
       metadata->playback_scale = scale;
       metadata->playback_scale_known = 1;
     }
-    free(scale_header);
   }
 
-  range_header = rtsp_find_header(response, "Range");
-  if (range_header) {
-    size_t len = strlen(range_header);
-    int valid = len > 0 && len < sizeof(metadata->playback_range);
+  range_header = http_headers_find(headers, num_headers, "Range");
+  if (range_header && range_header->value_len > 0 && range_header->value_len < sizeof(metadata->playback_range)) {
+    int valid = 1;
 
-    for (size_t i = 0; valid && i < len; i++) {
-      unsigned char ch = (unsigned char)range_header[i];
+    for (size_t i = 0; valid && i < range_header->value_len; i++) {
+      unsigned char ch = (unsigned char)range_header->value[i];
       if (ch < 0x20 || ch > 0x7e)
         valid = 0;
     }
-    if (valid) {
-      memcpy(metadata->playback_range, range_header, len + 1);
-    }
-    free(range_header);
+    if (valid)
+      http_headers_copy_token(metadata->playback_range, sizeof(metadata->playback_range), range_header->value,
+                              range_header->value_len);
   }
 }
 
@@ -2929,15 +3125,23 @@ static int rtsp_parse_npt_time(const char *value, const char **end_out, double *
  *    ``session->r2h_duration_value``.
  *
  * @param session      RTSP session
- * @param header_start Start of the RTSP response header in the buffer
+ * @param headers      Parsed RTSP response headers
+ * @param num_headers  Number of parsed headers
  * @param sdp_body     Start of the SDP body (right after \\r\\n\\r\\n)
  */
-static void rtsp_parse_describe_sdp(rtsp_session_t *session, const char *header_start, const char *sdp_body) {
+static void rtsp_parse_describe_sdp(rtsp_session_t *session, const struct phr_header *headers, size_t num_headers,
+                                    const char *sdp_body) {
   stream_metadata_t *metadata = rtsp_metadata(session);
+  char content_base[RTSP_SERVER_URL_SIZE];
+  const char *base_url = session->server_url;
+  int has_content_base = 0;
+
   session->setup_url[0] = '\0';
 
-  char *content_base = rtsp_find_header(header_start, "Content-Base");
-  const char *base_url = content_base ? content_base : session->server_url;
+  if (http_headers_copy(headers, num_headers, "Content-Base", content_base, sizeof(content_base)) == 0) {
+    base_url = content_base;
+    has_content_base = 1;
+  }
 
   if (*sdp_body == '\0')
     goto done;
@@ -3029,74 +3233,128 @@ static void rtsp_parse_describe_sdp(rtsp_session_t *session, const char *header_
   }
 
 done:
-  if (content_base) {
+  if (has_content_base)
     logger(LOG_DEBUG, "RTSP: Content-Base: %s", content_base);
-    free(content_base);
-  }
 }
 
+/*
+ * Punch the media path so the operator network starts forwarding.
+ *
+ * On the RTP socket this sends the ZTE ZXV10 set-top box authentication
+ * datagram, which those deployments require before media flows.  Wire format
+ * (multi-byte fields are big-endian):
+ *
+ *   0..7    "ZXV10STB" magic
+ *   8..11   0x7fffffff
+ *   12..15  client IPv4 address
+ *   16..17  client RTP port
+ *   18..19  client RTSP control port
+ *   20..83  zero padding
+ *
+ * The protocol details are derived from https://github.com/plsy1/rtsproxy.
+ * Addresses and ports come from rtsp_nat_endpoint(), so behind NAT they carry
+ * the STUN-discovered public mapping rather than the private endpoint.
+ *
+ * On IPv6 control connections the packet cannot be built (its address field is
+ * IPv4) and a minimal RTP datagram is sent instead.  RTCP is punched with a
+ * minimal Receiver Report in both cases.  Everything is sent three times and
+ * repeated on every keepalive, since UDP gives no delivery guarantee and NAT
+ * bindings expire.
+ */
 static void rtsp_send_udp_nat_probe(rtsp_session_t *session) {
-  char port_str[RTSP_PORT_STRING_SIZE];
-  struct addrinfo hints;
-  struct addrinfo *result = NULL;
-  struct addrinfo *rp;
-  uint8_t rtp_packet[12];
+  struct sockaddr_storage destination;
+  socklen_t destination_len = 0;
+  rtsp_nat_endpoint_t nat;
+  uint8_t rtp_packet[84];
+  size_t rtp_packet_len;
   uint8_t rtcp_packet[8];
+  uint16_t network_port;
+  char destination_ip[INET6_ADDRSTRLEN] = "";
 
-  if (!session || session->server_source_addr[0] == '\0') {
+  if (!session || session->server_rtp_port <= 0 || session->server_rtp_port > 65535)
     return;
+
+  memset(&destination, 0, sizeof(destination));
+
+  /* Prefer the media source the server named in Transport; fall back to the
+   * RTSP control peer, which is where ZTE servers expect the punch anyway. */
+  if (session->server_source_addr[0] != '\0') {
+    struct addrinfo hints;
+    struct addrinfo *result = NULL;
+    struct addrinfo *rp;
+    char port_str[RTSP_PORT_STRING_SIZE];
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_protocol = IPPROTO_UDP;
+    snprintf(port_str, sizeof(port_str), "%d", session->server_rtp_port);
+
+    if (getaddrinfo(session->server_source_addr, port_str, &hints, &result) == 0) {
+      for (rp = result; rp != NULL; rp = rp->ai_next) {
+        if (rp->ai_family == session->upstream_family)
+          break;
+      }
+      if (!rp)
+        rp = result; /* Fallback: try the first resolved address */
+      memcpy(&destination, rp->ai_addr, rp->ai_addrlen);
+      destination_len = rp->ai_addrlen;
+      freeaddrinfo(result);
+    }
+  }
+  if (destination_len == 0 && session->control_endpoints_valid && session->zte_nat_active) {
+    struct sockaddr_in *sin = (struct sockaddr_in *)&destination;
+    sin->sin_family = AF_INET;
+    sin->sin_addr = session->control_peer_ip4;
+    destination_len = sizeof(struct sockaddr_in);
+  }
+  if (destination_len == 0)
+    return;
+
+  sockaddr_format_ip((struct sockaddr *)&destination, destination_ip, sizeof(destination_ip));
+  rtsp_nat_endpoint(session, &nat);
+
+  memset(rtp_packet, 0, sizeof(rtp_packet));
+  if (session->zte_nat_active) {
+    rtp_packet_len = 84;
+    memcpy(rtp_packet, "ZXV10STB", 8);
+    rtp_packet[8] = 0x7f;
+    rtp_packet[9] = 0xff;
+    rtp_packet[10] = 0xff;
+    rtp_packet[11] = 0xff;
+    memcpy(rtp_packet + 12, &nat.ip4.s_addr, sizeof(nat.ip4.s_addr));
+    network_port = htons(nat.rtp_port);
+    memcpy(rtp_packet + 16, &network_port, sizeof(network_port));
+    network_port = htons(nat.control_port);
+    memcpy(rtp_packet + 18, &network_port, sizeof(network_port));
+  } else {
+    /* Minimal RTP packet - 12 bytes */
+    rtp_packet_len = 12;
+    rtp_packet[0] = 0x80; /* V=2, P=0, X=0, CC=0 */
+    rtp_packet[1] = 0x00; /* M=0, PT=0 */
   }
 
-  /* Build minimal RTP packet - 12 bytes */
-  memset(rtp_packet, 0, sizeof(rtp_packet));
-  rtp_packet[0] = 0x80; /* V=2, P=0, X=0, CC=0 */
-  rtp_packet[1] = 0x00; /* M=0, PT=0 */
-
-  /* Build minimal RTCP RR (Receiver Report) - 8 bytes */
+  /* Minimal RTCP RR (Receiver Report) - 8 bytes */
   memset(rtcp_packet, 0, sizeof(rtcp_packet));
   rtcp_packet[0] = 0x80; /* V=2, P=0, RC=0 */
   rtcp_packet[1] = 201;  /* PT=201 (Receiver Report) */
   rtcp_packet[2] = 0x00; /* length in words - 1 (high byte) */
   rtcp_packet[3] = 0x01; /* length in words - 1 (low byte) = 1 */
 
-  memset(&hints, 0, sizeof(hints));
-  hints.ai_family = AF_UNSPEC;
-  hints.ai_socktype = SOCK_DGRAM;
-  hints.ai_protocol = IPPROTO_UDP;
-
-  /* Resolve server address once for both RTP and RTCP */
-  snprintf(port_str, sizeof(port_str), "%d", session->server_rtp_port);
-  if (getaddrinfo(session->server_source_addr, port_str, &hints, &result) != 0) {
-    return;
-  }
-
-  /* Pick the first address matching the UDP socket address family */
-  for (rp = result; rp != NULL; rp = rp->ai_next) {
-    if (rp->ai_family == session->upstream_family) {
-      break;
-    }
-  }
-  if (!rp) {
-    rp = result; /* Fallback: try the first resolved address */
-  }
-
-  /* Send 3 NAT probe packets for both RTP and RTCP */
   for (int attempt = 0; attempt < 3; attempt++) {
-    /* Send RTP probe */
-    if (session->server_rtp_port > 0 && session->rtp_socket >= 0) {
-      sockaddr_set_port(rp->ai_addr, (uint16_t)session->server_rtp_port);
-      sendto(session->rtp_socket, rtp_packet, sizeof(rtp_packet), 0, rp->ai_addr, rp->ai_addrlen);
+    if (session->rtp_socket >= 0) {
+      sockaddr_set_port((struct sockaddr *)&destination, (uint16_t)session->server_rtp_port);
+      sendto(session->rtp_socket, rtp_packet, rtp_packet_len, 0, (struct sockaddr *)&destination, destination_len);
     }
-
-    /* Send RTCP probe - update port in sockaddr */
     if (session->server_rtcp_port > 0 && session->rtcp_socket >= 0) {
-      sockaddr_set_port(rp->ai_addr, (uint16_t)session->server_rtcp_port);
-      sendto(session->rtcp_socket, rtcp_packet, sizeof(rtcp_packet), 0, rp->ai_addr, rp->ai_addrlen);
+      sockaddr_set_port((struct sockaddr *)&destination, (uint16_t)session->server_rtcp_port);
+      sendto(session->rtcp_socket, rtcp_packet, sizeof(rtcp_packet), 0, (struct sockaddr *)&destination,
+             destination_len);
     }
   }
 
-  freeaddrinfo(result);
-  logger(LOG_DEBUG, "RTSP: Sent NAT probe packets to %s:%d/%d", session->server_source_addr, session->server_rtp_port,
+  logger(LOG_DEBUG, "RTSP: Sent 3x %zu-byte %s NAT probe to %s:%d/%d", rtp_packet_len,
+         session->zte_nat_active ? "ZXV10STB" : "RTP", destination_ip, session->server_rtp_port,
          session->server_rtcp_port);
 }
 
@@ -3204,7 +3462,7 @@ static void rtsp_parse_transport_header(rtsp_session_t *session, const char *tra
       }
     }
 
-    /* Send NAT probe packets if server provided source address and ports */
+    /* Punch the media path now that the server has confirmed UDP */
     rtsp_send_udp_nat_probe(session);
   }
 }

@@ -22,6 +22,9 @@ const base: TranslationDict = {
   allChannels: "All",
   catchup: "Catchup",
   catchupSupported: "Catchup supported",
+  mediaLinkCopied: "Media link copied",
+  copyMediaLinkFailed: "Could not copy the media link",
+  copyMediaLinkUnavailable: "No media link available for this item",
 
   // EPG view
   noEpgAvailable: "No program guide available for this channel",
@@ -29,6 +32,18 @@ const base: TranslationDict = {
   replay: "Replay",
   nowPlaying: "Now Playing",
   excellentProgram: "Excellent Program",
+
+  // EPG timeline band
+  epgTimelineLabel: "Program timeline",
+  epgPanEarlier: "Earlier 30 minutes",
+  epgPanLater: "Later 30 minutes",
+  epgFollowPlayback: "Follow playback",
+  epgNotAiredYet: "This program has not started yet",
+  epgCatchupUnsupported: "This channel has no catch-up source",
+  epgCatchupConfirmTitle: "Replay from catch-up?",
+  epgCatchupConfirmBody: "The upstream catch-up source may not cover this period, so playback can fail.",
+  epgConfirm: "Continue",
+  epgCancel: "Cancel",
 
   // Video player
   selectChannelToWatch: "Select a channel to start watching",
@@ -84,6 +99,8 @@ const base: TranslationDict = {
   pause: "Pause",
   mute: "Mute",
   unmute: "Unmute",
+  previousChannel: "Previous channel",
+  nextChannel: "Next channel",
   fullscreen: "Fullscreen",
   exitFullscreen: "Exit Fullscreen",
   pictureInPicture: "Picture in Picture",
@@ -149,6 +166,9 @@ const zhHans: TranslationDict = {
   allChannels: "全部",
   catchup: "回看",
   catchupSupported: "支持回看",
+  mediaLinkCopied: "已复制媒体直链",
+  copyMediaLinkFailed: "复制媒体直链失败",
+  copyMediaLinkUnavailable: "该项没有可复制的媒体直链",
 
   // EPG 视图
   noEpgAvailable: "此频道暂无节目单",
@@ -156,6 +176,18 @@ const zhHans: TranslationDict = {
   replay: "回放",
   nowPlaying: "正在播放",
   excellentProgram: "精彩节目",
+
+  // EPG timeline band
+  epgTimelineLabel: "节目时间轴",
+  epgPanEarlier: "向前 30 分钟",
+  epgPanLater: "向后 30 分钟",
+  epgFollowPlayback: "跟随播放",
+  epgNotAiredYet: "该节目尚未播出",
+  epgCatchupUnsupported: "该频道没有回看源",
+  epgCatchupConfirmTitle: "从回看播放？",
+  epgCatchupConfirmBody: "上游回看源可能不包含该时段，播放可能失败。",
+  epgConfirm: "继续",
+  epgCancel: "取消",
 
   // 视频播放器
   selectChannelToWatch: "选择一个频道开始观看",
@@ -210,6 +242,8 @@ const zhHans: TranslationDict = {
   pause: "暂停",
   mute: "静音",
   unmute: "取消静音",
+  previousChannel: "上一个频道",
+  nextChannel: "下一个频道",
   fullscreen: "全屏",
   exitFullscreen: "退出全屏",
   pictureInPicture: "画中画",
@@ -276,6 +310,9 @@ const zhHant: TranslationDict = {
   allChannels: "全部",
   catchup: "回看",
   catchupSupported: "支援回看",
+  mediaLinkCopied: "已複製媒體直鏈",
+  copyMediaLinkFailed: "複製媒體直鏈失敗",
+  copyMediaLinkUnavailable: "該項沒有可複製的媒體直鏈",
 
   // EPG 視圖
   noEpgAvailable: "此頻道暫無節目表",
@@ -283,6 +320,18 @@ const zhHant: TranslationDict = {
   replay: "重播",
   nowPlaying: "正在播放",
   excellentProgram: "精彩節目",
+
+  // EPG timeline band
+  epgTimelineLabel: "節目時間軸",
+  epgPanEarlier: "向前 30 分鐘",
+  epgPanLater: "向後 30 分鐘",
+  epgFollowPlayback: "跟隨播放",
+  epgNotAiredYet: "該節目尚未播出",
+  epgCatchupUnsupported: "此頻道沒有回看來源",
+  epgCatchupConfirmTitle: "從回看播放？",
+  epgCatchupConfirmBody: "上游回看來源可能不包含該時段，播放可能失敗。",
+  epgConfirm: "繼續",
+  epgCancel: "取消",
 
   // 視訊播放器
   selectChannelToWatch: "選擇一個頻道開始觀看",
@@ -337,6 +386,8 @@ const zhHant: TranslationDict = {
   pause: "暫停",
   mute: "靜音",
   unmute: "取消靜音",
+  previousChannel: "上一個頻道",
+  nextChannel: "下一個頻道",
   fullscreen: "全屏",
   exitFullscreen: "退出全屏",
   pictureInPicture: "畫中畫",

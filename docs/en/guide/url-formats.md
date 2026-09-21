@@ -38,6 +38,7 @@ http://192.168.1.1:5140/rtp/239.253.64.120:5140?fcc=10.255.14.152:15970&r2h-ifna
 - **fec** (optional): FEC (Forward Error Correction) port number, used to receive FEC redundant packets for packet loss recovery
 - **r2h-ifname** (optional): Specify the upstream network interface to use (overrides global configuration)
 - **r2h-ifname-fcc** (optional): Specify the upstream network interface for FCC (overrides global configuration)
+- **r2h-filename** (optional): Download filename. See [Download Filename](#download-filename)
 
 ### Use Cases
 
@@ -106,6 +107,19 @@ RTSP, standard multicast, and FCC streams carry the following `R2H-*` metadata i
 | `R2H-FCC-Type` | Configured FCC protocol: `telecom` or `huawei`. |
 | `R2H-FCC-Status` | `active` when playback starts from FCC unicast; `fallback` when it starts from multicast. |
 
+## Download Filename
+
+Multicast RTP and RTSP MPEG-TS responses honor the `r2h-filename` query parameter. When it is non-empty, rtp2httpd sends `Content-Disposition: attachment` so browsers save the download under that name. The server strips path separators and control characters, and appends `.ts` when the suffix is missing.
+
+This parameter is local to rtp2httpd and is not forwarded upstream. HTTP/HLS reverse proxy requests strip it before the upstream fetch and do not set `Content-Disposition`.
+
+```url
+http://192.168.1.1:5140/rtp/239.253.64.120:5140?r2h-filename=CCTV-1.ts
+http://192.168.1.1:5140/rtsp/iptv.example.com:554/channel1?playseek=20240101120000-20240101130000&r2h-filename=CCTV-1_News_20240101-120000_20240101-130000.ts
+```
+
+The built-in web player adds this parameter automatically when you copy a media link.
+
 ## HTTP Reverse Proxy
 
 ```url
@@ -149,6 +163,21 @@ http://192.168.1.1:5140/http/iptv.example.com/channel1?r2h-ifname=eth0
 ```
 
 See [Time Processing Guide](/en/guide/time-processing) for details.
+
+### Upstream 30x Redirects
+
+When the upstream returns `301` / `302` / `303` / `307` / `308`, rtp2httpd rewrites the `Location` header by scheme so the player stays on this instance:
+
+| Upstream `Location` | Forwarded to the client |
+| --- | --- |
+| `http://iptv.example.com:8080/path` | `/http/iptv.example.com:8080/path` |
+| `rtsp://iptv.example.com:554/path?auth=...` | `/rtsp/iptv.example.com:554/path?auth=...` |
+| `rtp://239.0.0.1:1234` | `/rtp/239.0.0.1:1234` |
+| `udp://239.0.0.1:1234` | `/udp/239.0.0.1:1234` |
+| `/rtsp/iptv.example.com:554/path` (root-relative) | forwarded unchanged |
+| `https://...` or other unsupported schemes | forwarded unchanged |
+
+The rewrite covers the same URL formats M3U transform recognizes: `http://`, `rtsp://`, `rtp://`, and `udp://`. This covers the case where `catchup-source` first points to an HTTP auth/token service, which then 302-redirects to the real playback URL. If `app-path-prefix` is configured, rewritten locations include that prefix.
 
 ### Notes
 
@@ -241,6 +270,8 @@ Access the web status page to view:
 - System log viewer
 - Remote management functions (force disconnect, adjust log level, etc.)
 - Service control: reload configuration, restart worker processes
+
+When you force-disconnect a client, rtp2httpd closes that connection immediately and then rejects all new connections from that client IP for 5 seconds (returning `HTTP 429 Too Many Requests` with `Retry-After`) so the player cannot reconnect right away.
 
 **Service control** (equivalent to sending Unix signals to the supervisor):
 

@@ -1,8 +1,10 @@
-# <img src="./web-ui/public/assets/icon-192.png" width="24" height="24"> rtp2httpd - IPTV Streaming Gateway
+[<img width="2171" height="238" alt="token-unlimited-sponsorship" src="https://github.com/user-attachments/assets/97fce998-e0ed-4335-ad9c-a880b4fafc12" />](https://token-unlimited.com/?utm_source=rtp2httpd&utm_medium=display&utm_campaign=2026_sept_promo&utm_content=github_banner)
 
-[>> Official Documentation <<](https://rtp2httpd.com)
+# <img src="./web-ui/public/assets/icon-192.png" width="24" height="24"> rtp2httpd - IPTV 流媒体转发服务器
 
-[>> English README <<](README.en.md)
+[>> 访问官方文档网站 <<](https://rtp2httpd.com)
+
+[>> English Documentation <<](https://rtp2httpd.com/en/)
 
 rtp2httpd 是一个 IPTV 转发服务器，支持将组播 RTP/UDP、RTSP 转换为 HTTP 流，或将 HLS 流从内网代理到外网。
 
@@ -38,7 +40,6 @@ rtp2httpd 是一个 IPTV 转发服务器，支持将组播 RTP/UDP、RTSP 转换
 - **客户端连接统计**：显示每个连接的 IP、状态、带宽使用、传输数据量
 - **系统日志查看**：实时查看服务器日志，支持动态调整日志级别
 - **远程管理功能**：通过 Web 界面强制断开客户端连接
-- **设置页面**：通过浏览器访问 `http://<server:port>/setting` 修改全局配置，无需编辑配置文件或重启服务
 
 ### 🎬 内置播放器
 
@@ -53,9 +54,9 @@ rtp2httpd 是一个 IPTV 转发服务器，支持将组播 RTP/UDP、RTSP 转换
 - **非阻塞 IO 模型**：使用 epoll 事件驱动，高效处理大量并发连接
 - **多核优化**：支持多 worker 进程，充分利用多核 CPU 提高最大吞吐量
 - **缓冲池优化**：预分配缓冲池，避免频繁内存分配，多客户端根据负载动态共享，避免慢客户端吃满资源
-- **零拷贝技术**：支持 Linux 内核 MSG_ZEROCOPY 特性，避免数据在用户态和内核态之间的拷贝
+- **同源复用**：同一工作进程内共享组播订阅、RTP 处理和批量缓冲，减少多客户端重复工作
 - **轻量化**：使用纯 C 语言编写，零依赖，小巧简洁，适合运行在各种嵌入式设备上（路由器、光猫、NAS 等）
-  - 程序大小仅 450KB (x86_64)，并内置了 Web 播放器所有前端资源
+  - 程序大小仅 509KB (x86_64)，并内置了 Web 播放器所有前端资源
 - 查看 **[性能测试报告](https://rtp2httpd.com/reference/benchmark)**（与 msd_lite、udpxy、tvgate 的性能对比）
 
 ## 📹 演示效果

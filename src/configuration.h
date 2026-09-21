@@ -49,20 +49,15 @@ typedef struct {
   char *pid_file;       /* Supervisor PID file path (NULL=disabled) */
 
   /* Network and service settings */
-  int udpxy;                  /* Enable UDPxy URL format support (0=no, 1=yes) */
-  int maxclients;             /* Maximum concurrent client connections */
-  char *hostname;             /* Server hostname for URL generation (NULL=auto) */
-  int xff;                    /* Enable X-Forwarded-For header recognize (0=no, 1=yes) */
-  char *r2h_token;            /* Authentication token for HTTP requests (NULL=disabled) */
-  char *web_auth_user;        /* HTTP Basic Auth username for /status,/player,/setting
-                                  from non-local clients (NULL=disabled) */
-  char *web_auth_password;    /* HTTP Basic Auth password (NULL=disabled) */
-  int web_auth_require_local; /* Also require Basic Auth for local/LAN clients
-                                  (0=local bypasses auth [default], 1=always required) */
+  int udpxy;       /* Enable UDPxy URL format support (0=no, 1=yes) */
+  int maxclients;  /* Maximum concurrent client connections */
+  char *hostname;  /* Server hostname for URL generation (NULL=auto) */
+  int xff;         /* Enable X-Forwarded-For header recognize (0=no, 1=yes) */
+  char *r2h_token; /* Authentication token for HTTP requests (NULL=disabled) */
 
   /* Worker and performance settings */
   int workers;              /* Number of worker threads (SO_REUSEPORT sharded), default 1 */
-  int buffer_pool_max_size; /* Maximum number of buffers in zero-copy buffer
+  int buffer_pool_max_size; /* Maximum number of buffers in buffer
                                pool, default 16384 */
   int udp_rcvbuf_size;      /* UDP socket receive buffer size in bytes for
                                multicast, FCC, and RTSP sockets. Default 512KB */
@@ -108,11 +103,6 @@ typedef struct {
   char *player_page_route; /* Player page path without leading slash (may be
                               empty) */
 
-  /* Setting page settings */
-  char *setting_page_path;  /* Absolute HTTP path for setting page (leading slash) */
-  char *setting_page_route; /* Setting page path without leading slash (may be
-                               empty) */
-
   /* Public app mount path settings */
   char *app_path_prefix;        /* Absolute public app path prefix, or empty string */
   char *app_path_route;         /* App path prefix without leading slash, or empty string */
@@ -124,11 +114,7 @@ typedef struct {
                                           */
   int64_t last_external_m3u_update_time; /* Last update time in milliseconds */
 
-  /* Zero-copy settings */
-  int zerocopy_on_send; /* Enable zero-copy send with MSG_ZEROCOPY (0=disabled,
-                           1=enabled) */
-
-  /* STUN NAT traversal settings */
+  /* RTSP NAT traversal settings */
   char *rtsp_stun_server;      /* STUN server host:port for RTSP NAT traversal
                                   (NULL=disabled) */
   char *http_proxy_user_agent; /* Override User-Agent header for upstream HTTP
@@ -236,32 +222,5 @@ void set_config_file_path(const char *path);
  * @return 1 if equal, 0 if different
  */
 int bind_addresses_equal(bindaddr_t *a, bindaddr_t *b);
-
-/**
- * Check whether any configured bind address is a Unix domain socket path.
- * @return 1 if at least one Unix socket listener is configured, 0 otherwise
- */
-int bind_addresses_has_unix(void);
-
-/**
- * A single key/value pair to apply to the [global] section of a config file.
- * A NULL or empty value removes/unsets that key instead of writing it.
- */
-typedef struct {
-  const char *key;
-  const char *value;
-} setting_kv_t;
-
-/**
- * Rewrite `path`'s [global] section to apply `kvs`, and replace its [bind]
- * section with `listen_lines` (each already in raw "[bind]"-section-line
- * form, e.g. "* 5140" or "/var/run/rtp2httpd.sock"). Preserves comments,
- * ordering, and all other sections (including [services]) untouched.
- * Creates missing sections. Writes atomically (temp file + rename).
- *
- * @return 0 on success, -1 on I/O error
- */
-int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size_t n_kvs, const char **listen_lines,
-                                 size_t n_listen);
 
 #endif /* __CONFIGURATION_H__ */

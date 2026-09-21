@@ -31,7 +31,8 @@ typedef enum {
   STATUS_500 = 5,
   STATUS_401 = 6,
   STATUS_304 = 7,
-  STATUS_204 = 8
+  STATUS_204 = 8,
+  STATUS_429 = 9
 } http_status_t;
 
 /* HTTP request parsing state */
@@ -50,7 +51,6 @@ typedef struct {
   char x_forwarded_proto[16];
   int x_request_snapshot;
   char cookie[HTTP_COOKIE_BUFFER_SIZE];     /* Cookie header value for r2h-token extraction */
-  char authorization[512];                  /* Authorization header value, e.g. "Basic <base64>" */
   char access_control_request_method[64];   /* CORS preflight method */
   char access_control_request_headers[512]; /* CORS preflight headers */
   http_parse_state_t parse_state;
@@ -116,6 +116,28 @@ int http_url_decode(char *str);
  * @return Newly allocated encoded string (caller must free), or NULL on error
  */
 char *http_url_encode(const char *str);
+
+/* Max sanitized download filename (excluding NUL), including the .ts suffix. */
+#ifndef HTTP_DOWNLOAD_FILENAME_MAX
+#define HTTP_DOWNLOAD_FILENAME_MAX 180
+#endif
+
+/**
+ * Sanitize a client-supplied download filename for Content-Disposition.
+ * Replaces path separators / control characters, truncates on a UTF-8
+ * character boundary, and ensures a .ts suffix.
+ *
+ * @return 0 on success, -1 if input is empty after sanitizing or buffers are invalid
+ */
+int http_sanitize_download_filename(const char *input, char *output, size_t output_size);
+
+/**
+ * Build a Content-Disposition header line including the trailing CRLF.
+ * Uses RFC 6266 `filename` plus RFC 5987 `filename*` when the name is not ASCII.
+ *
+ * @return Bytes written, or -1 on error / truncation
+ */
+int http_build_content_disposition_header(const char *filename, char *output, size_t output_size);
 
 /**
  * Build a Set-Cookie header for the configured r2h-token.
@@ -223,10 +245,11 @@ void http_send_503(connection_t *conn);
 void http_send_401(connection_t *conn);
 
 /**
- * Send HTTP 401 Unauthorized response with a Basic auth challenge
+ * Send HTTP 429 Too Many Requests response
  * @param conn Connection object
+ * @param retry_after_sec Retry-After value in seconds (minimum 1)
  */
-void http_send_401_basic(connection_t *conn);
+void http_send_429(connection_t *conn, int retry_after_sec);
 
 /**
  * Parse URL and extract components (protocol, host, port, path)

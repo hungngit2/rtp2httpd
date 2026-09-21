@@ -11,7 +11,9 @@ import {
   useState,
 } from "react";
 import { createPortal } from "react-dom";
+import { usePlayerTouchGestures } from "../../hooks/use-player-touch-gestures";
 import { usePlayerTranslation } from "../../hooks/use-player-translation";
+import { useWallClockMinute } from "../../hooks/use-wall-clock-minute";
 import {
   getDocumentPictureInPicture,
   getDocumentPiPWindowOptions,
@@ -22,6 +24,7 @@ import {
 } from "../../lib/document-picture-in-picture";
 import type { Locale } from "../../lib/locale";
 import { buildCatchupSegments } from "../../lib/m3u-parser";
+import { isVolumeControlSupported } from "../../lib/platform";
 import { getMuted, getVolume, saveMuted, saveVolume } from "../../lib/player-storage";
 import { createProgramTimeline, programPositionToWallClock } from "../../lib/program-timeline";
 import {
@@ -48,7 +51,10 @@ import mp2WasmUrl from "../../playback-engine/wasm/minimp3/mp2_decoder.wasm?url"
 import type { Channel, EPGProgram } from "../../types/player";
 import type { PictureInPictureMode } from "../../types/ui";
 import { PLAYER_OVERLAY_SURFACE_CLASS } from "./classnames";
+import type { PlaybackClock } from "./playback-clock";
+import { PlaybackTimeProvider } from "./playback-time-context";
 import { PlayerControls } from "./player-controls";
+import { PlayerGestureIndicatorOverlay } from "./player-gesture-overlay";
 import { PlayerSelectedGlassLayers } from "./player-selected-glass-layers";
 
 interface VideoPlayerProps {
@@ -58,12 +64,20 @@ interface VideoPlayerProps {
   onError?: (error: string) => void;
   locale: Locale;
   currentProgram?: EPGProgram | null;
+  /** Every programme known for the current channel, for the EPG timeline band. */
+  epgPrograms?: readonly EPGProgram[];
   onSeek?: (seekTime: Date, goingLive: boolean) => void;
+  /** Channel EPG programmes used to split catchup playseek windows and to rebuild URLs on retry. */
+  catchupPrograms?: readonly Pick<EPGProgram, "start" | "end">[];
   /** Recalibrate MSE t=0 → wall-clock mapping (live mode). */
   onStreamStartTimeChange?: (time: Date) => void;
   streamStartTime: Date;
-  onCurrentVideoTimeChange: (time: number) => void;
+  /** Media clock fed from the active backend's position and published to the controls. */
+  clock: PlaybackClock;
   onChannelNavigate?: (target: "prev" | "next" | number) => void;
+  /** Neighbours of the current channel, used to preview the target of a swipe-to-zap gesture. */
+  prevChannel?: Channel | null;
+  nextChannel?: Channel | null;
   showSidebar?: boolean;
   onToggleSidebar?: () => void;
   isFullscreen: boolean;
@@ -196,24 +210,7 @@ function PlayerTopLeftOverlay({
   loading: boolean;
   loadingText: string;
 }) {
-  const [time, setTime] = useState(() => new Date());
-
-  useEffect(() => {
-    const tick = () => setTime(new Date());
-    tick();
-
-    const msUntilNextMinute = 60_000 - (Date.now() % 60_000);
-    let intervalId = 0;
-    const timeoutId = window.setTimeout(() => {
-      tick();
-      intervalId = window.setInterval(tick, 60_000);
-    }, msUntilNextMinute);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-      if (intervalId) window.clearInterval(intervalId);
-    };
-  }, []);
+  const time = new Date(useWallClockMinute());
 
   return (
     <div
@@ -257,11 +254,15 @@ function VideoPlayerComponent({
   locale,
   playMode,
   currentProgram = null,
+  epgPrograms,
+  catchupPrograms = [],
   onSeek,
   onStreamStartTimeChange,
   streamStartTime,
-  onCurrentVideoTimeChange,
+  clock,
   onChannelNavigate,
+  prevChannel = null,
+  nextChannel = null,
   showSidebar = true,
   onToggleSidebar,
   isFullscreen,
@@ -277,9 +278,13 @@ function VideoPlayerComponent({
   const t = usePlayerTranslation(locale);
   const playbackBackendKind = getPlaybackBackendKind();
   const currentVideoTimeRef = useRef(0);
-  const canSeekProgramInMediaSession = Boolean(
-    currentProgram && channel?.sources.some((source) => source.catchup && source.catchupSource),
-  );
+  // A channel with no catchup source has nothing to seek into: a target outside the MSE
+  // buffer falls back to rebuilding the stream at the live edge, which is just a dropped
+  // connection with no seek to show for it. Seeking is therefore off across every entry
+  // point — the timeline in PlayerControls gates on the same expression.
+  const isCatchupSupported = Boolean(channel?.sources.some((source) => source.catchup && source.catchupSource));
+  const canSeekProgramInMediaSession = Boolean(currentProgram) && isCatchupSupported;
+  const canControlVolume = isVolumeControlSupported();
   const canNavigateChannelsInMediaSession = Boolean(channel && onChannelNavigate);
 
   const playerDockRef = useRef<HTMLDivElement>(null);
@@ -322,7 +327,6 @@ function VideoPlayerComponent({
   const setSlotRenderState = (slotId: SlotId, renderState: PlayerRenderState) =>
     setSlotRenderStates((previousStates) =>
       previousStates[slotId].active === renderState.active &&
-      previousStates[slotId].detectedScanType === renderState.detectedScanType &&
       previousStates[slotId].deinterlacing === renderState.deinterlacing
         ? previousStates
         : { ...previousStates, [slotId]: renderState },
@@ -390,6 +394,7 @@ function VideoPlayerComponent({
   }, [isLoading]);
 
   const handleRelativeSeek = useEffectEvent((deltaSeconds: number) => {
+    if (!isCatchupSupported) return;
     const activePlayer = getActivePlayer();
     if (!activePlayer) return;
     const state = activePlayer.getState();
@@ -526,24 +531,7 @@ function VideoPlayerComponent({
     [hideControlsImmediately],
   );
 
-  // Click / tap toggles controls. The handler lives on the whole player surface (not
-  // just the <video>) so taps on the letterbox bars outside the 16:9 frame — common on
-  // desktop/tablet where the surface is taller/wider than the video — toggle too. We
-  // only act when the click lands on the surface itself or the video element; overlays
-  // (toolbar buttons, channel info) sit above and own their own clicks, so a click that
-  // bubbles up from them is ignored and never dismisses the controls.
-  const handleSurfaceClick = useCallback(
-    (event: ReactMouseEvent) => {
-      const target = event.target as HTMLElement;
-      if (target !== event.currentTarget && target.tagName !== "VIDEO") return;
-      if (showControls) {
-        hideControlsImmediately();
-      } else {
-        showControlsImmediately();
-      }
-    },
-    [showControls, hideControlsImmediately, showControlsImmediately],
-  );
+  // `handleSurfaceClick` lives further down, next to the touch-gesture wiring it depends on.
 
   // Start auto-hide timer on mount
   useEffect(() => {
@@ -705,6 +693,7 @@ function VideoPlayerComponent({
       const seekTime = mseToWallClock(currentVideoTimeRef.current, streamStartTime);
       return buildCatchupSegments(source, seekTime, {
         overlapMs: playbackBackendKind === "native" ? 0 : undefined,
+        programs: catchupPrograms,
       });
     }
     return segments;
@@ -902,7 +891,7 @@ function VideoPlayerComponent({
     p.on("time-update", (time) => {
       if (slotPlayerRef(slotId).current !== p || slotId !== getActiveSlotId()) return;
       currentVideoTimeRef.current = time;
-      onCurrentVideoTimeChange(time);
+      clock.update(time);
       updateMediaSessionPosition();
     });
     p.on("ended", () => {
@@ -1144,9 +1133,8 @@ function VideoPlayerComponent({
 
     const pendingTransition = { gen, slotId: pendingId, player: pendingPlayer, startedAt: performance.now() };
     pendingTransitionRef.current = pendingTransition;
-    // The pending slot's player resets its interlace verdict on loadSegments and
-    // starts detecting while hidden, so an interlaced verdict can be ready the
-    // moment the switch completes (no combing flash on channel change)
+    // The pending slot resets render state on loadSegments; interlaced metadata
+    // from the new source can enable bwdif before the switch completes.
     setSlotMediaInfo((previousMediaInfo) => ({ ...previousMediaInfo, [pendingId]: null }));
     pendingPlayer.loadSegments(newSegments);
 
@@ -1540,6 +1528,49 @@ function VideoPlayerComponent({
     }
   });
 
+  const {
+    indicator: gestureIndicator,
+    consumeSuppressedClick,
+    gestureHandlers,
+  } = usePlayerTouchGestures({
+    enabled: Boolean(channel) && !error && !needsUserInteraction,
+    enableSeekGesture: isCatchupSupported,
+    enableVolumeGesture: canControlVolume,
+    volume,
+    isMuted,
+    prevChannel,
+    nextChannel,
+    onVolumeChange: handleVolumeChange,
+    onChannelNavigate,
+    onRelativeSeek: handleRelativeSeek,
+    onTogglePlayPause: togglePlayPause,
+    onShowControls: showControlsImmediately,
+  });
+
+  // Click / tap toggles controls. The handler lives on the whole player surface (not
+  // just the <video>) so taps on the letterbox bars outside the 16:9 frame — common on
+  // desktop/tablet where the surface is taller/wider than the video — toggle too. We
+  // only act when the click lands on the surface itself, the video element, or the
+  // transparent gesture layer that covers both; overlays (toolbar buttons, channel info)
+  // sit above and own their own clicks, so a click that bubbles up from them is ignored
+  // and never dismisses the controls. A click that trails a completed touch gesture is
+  // swallowed as well.
+  const handleSurfaceClick = useCallback(
+    (event: ReactMouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (target !== event.currentTarget && target.tagName !== "VIDEO" && !("playerSurfaceHit" in target.dataset)) {
+        return;
+      }
+      if (consumeSuppressedClick()) return;
+      if (showControls) {
+        hideControlsImmediately();
+      } else {
+        showControlsImmediately();
+      }
+    },
+    [showControls, hideControlsImmediately, showControlsImmediately, consumeSuppressedClick],
+  );
+
   const exitPictureInPicture = useEffectEvent(async (): Promise<boolean> => {
     const documentPictureInPicture = getDocumentPictureInPicture();
     const pipWindow = documentPictureInPicture?.window ?? documentPiPWindowRef.current;
@@ -1773,6 +1804,22 @@ function VideoPlayerComponent({
         ))}
       </div>
 
+      {/*
+        Touch gesture layer: left half swipes zap channels, right half swipes set volume,
+        horizontal swipes seek, double tap toggles playback. It sits above the video but
+        below every overlay (z-10 / z-20), so visible controls keep priority. `touch-none`
+        stays scoped to this element on purpose — putting it on the surface would inherit
+        down into the settings popover and break its scrolling.
+      */}
+      {!needsUserInteraction && !error && (
+        <div
+          aria-hidden="true"
+          data-player-surface-hit=""
+          className="absolute inset-0 z-[1] touch-none select-none"
+          {...gestureHandlers}
+        />
+      )}
+
       {!needsUserInteraction && !error && (
         <PlayerTopLeftOverlay
           visible={showControls || showLoading}
@@ -1951,27 +1998,30 @@ function VideoPlayerComponent({
           className={clsx(
             "player-performance-controls-position player-performance-motion absolute bottom-0 left-[calc(0px_-_env(safe-area-inset-left))] right-[calc(0px_-_env(safe-area-inset-right))] z-10 transition-opacity duration-300",
             showSidebar && "md:right-0",
+            // Invisible pulse animations still wake the compositor. Restore the
+            // live indicator animation when pointer or keyboard controls appear.
             showControls
               ? "opacity-100"
-              : "opacity-0 pointer-events-none has-focus-visible:opacity-100 has-focus-visible:pointer-events-auto",
+              : "opacity-0 pointer-events-none has-focus-visible:opacity-100 has-focus-visible:pointer-events-auto [&_.animate-pulse]:animate-none has-focus-visible:[&_.animate-pulse]:animate-pulse",
           )}
         >
           <PlayerControls
             channel={channel}
             currentProgram={currentProgram}
+            epgPrograms={epgPrograms}
             isLive={isLive}
             onSeek={handleSeek}
             onScrubbingChange={handleScrubbingChange}
             locale={locale}
             mediaInfo={slotMediaInfo[visibleSlotId]}
             renderState={slotRenderStates[visibleSlotId]}
-            autoDeinterlace={autoDeinterlace}
             seekStartTime={streamStartTime}
             liveSessionAnchor={liveSessionAnchor}
             isPlaying={isPlaying}
             onPlayPause={togglePlayPause}
             volume={volume}
             onVolumeChange={handleVolumeChange}
+            canControlVolume={canControlVolume}
             isMuted={isMuted}
             onMuteToggle={handleMuteToggle}
             onFullscreen={handleFullscreen}
@@ -1986,6 +2036,10 @@ function VideoPlayerComponent({
             onSourceChange={onSourceChange}
           />
         </div>
+      )}
+
+      {channel && !error && !needsUserInteraction && (
+        <PlayerGestureIndicatorOverlay indicator={gestureIndicator} locale={locale} />
       )}
     </div>
   );
@@ -2004,9 +2058,14 @@ function VideoPlayerComponent({
           </div>
         )}
       </div>
-      {createPortal(playerSurface, playerPortalHost)}
+      <PlaybackTimeProvider clock={clock}>{createPortal(playerSurface, playerPortalHost)}</PlaybackTimeProvider>
     </div>
   );
 }
 
+// Deliberately NOT wrapped in memo(): this component relies on useEffectEvent, and react-dom
+// 19.2 only refreshes Effect Event implementations for plain function-component fibers, not
+// for the SimpleMemoComponent fiber memo() produces. Under memo() every Effect Event kept its
+// mount-time props (playMode stayed "live", streamStartTime stayed at page load), which broke
+// catchup seeking. PlayerPage instead avoids re-rendering on the 1 Hz playback clock.
 export { VideoPlayerComponent as VideoPlayer };

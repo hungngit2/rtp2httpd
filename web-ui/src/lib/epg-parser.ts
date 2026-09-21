@@ -1,3 +1,4 @@
+import { XMLParser } from "fast-xml-parser";
 import type { EPGProgram } from "../types/player";
 
 /**
@@ -5,19 +6,66 @@ import type { EPGProgram } from "../types/player";
  */
 export type EPGData = Record<string, EPGProgram[]>;
 
+const EPG_ARRAY_TAGS = new Set(["channel", "programme", "display-name", "title"]);
+const EPG_KEEP_TAGS = new Set(["tv", "channel", "programme", "display-name", "title"]);
+
+const xmlParser = new XMLParser({
+  ignoreAttributes: false,
+  parseTagValue: false,
+  parseAttributeValue: false,
+  trimValues: true,
+  ignoreDeclaration: true,
+  ignorePiTags: true,
+  isArray: (tagName) => EPG_ARRAY_TAGS.has(tagName),
+  updateTag: (tagName) => (EPG_KEEP_TAGS.has(tagName) ? tagName : false),
+});
+
+type XmlTextNode = string | { "#text"?: string };
+
+type XmlChannel = {
+  "@_id"?: string;
+  "display-name"?: XmlTextNode[];
+};
+
+type XmlProgramme = {
+  "@_channel"?: string;
+  "@_start"?: string;
+  "@_stop"?: string;
+  title?: XmlTextNode[];
+};
+
+type XmlTv = {
+  channel?: XmlChannel[];
+  programme?: XmlProgramme[];
+};
+
+function xmlTextContent(node: XmlTextNode | undefined): string | undefined {
+  if (node === undefined) {
+    return undefined;
+  }
+  if (typeof node === "string") {
+    return node || undefined;
+  }
+  const text = node["#text"];
+  return typeof text === "string" && text ? text : undefined;
+}
+
 /**
- * Parse EPG XML data and organize by channel ID and display names
- * Supports XMLTV format
+ * Parse EPG XML data and organize by channel ID and display names.
+ * Supports XMLTV format. Safe to call from a Web Worker — no DOM APIs.
  * @param xmlText - XMLTV format XML string
  * @param validChannelIds - Optional set of valid channel IDs from M3U to filter programs
  */
-export async function parseEPG(xmlText: string, validChannelIds?: Set<string>): Promise<EPGData> {
-  const parser = new DOMParser();
-  const xmlDoc = parser.parseFromString(xmlText, "text/xml");
+export function parseEPG(xmlText: string, validChannelIds?: Set<string>): EPGData {
+  const parsed = xmlParser.parse(xmlText) as { tv?: XmlTv };
+  const tv = parsed.tv;
+  if (!tv) {
+    return {};
+  }
 
   const epgData: EPGData = {};
-  const channelLookupKeys = extractChannelLookupKeys(xmlDoc);
-  const programElements = xmlDoc.getElementsByTagName("programme");
+  const channelLookupKeys = extractChannelLookupKeys(tv.channel ?? []);
+  const programElements = tv.programme ?? [];
 
   const getOrCreateProgramBucket = (lookupKeys: string[]): EPGProgram[] => {
     for (const key of lookupKeys) {
@@ -37,10 +85,8 @@ export async function parseEPG(xmlText: string, validChannelIds?: Set<string>): 
     return programs;
   };
 
-  for (let i = 0; i < programElements.length; i++) {
-    const prog = programElements[i];
-
-    const channelId = prog.getAttribute("channel") || "";
+  for (const prog of programElements) {
+    const channelId = prog["@_channel"] || "";
     if (!channelId) {
       continue;
     }
@@ -51,25 +97,19 @@ export async function parseEPG(xmlText: string, validChannelIds?: Set<string>): 
       continue;
     }
 
-    const start = parseXMLTVTime(prog.getAttribute("start") || "");
-    const stop = parseXMLTVTime(prog.getAttribute("stop") || "");
+    const start = parseXMLTVTime(prog["@_start"] || "");
+    const stop = parseXMLTVTime(prog["@_stop"] || "");
 
     if (!start || !stop) continue;
 
-    const titleElement = prog.getElementsByTagName("title")[0];
-
-    const title = titleElement?.textContent;
-
     const program: EPGProgram = {
       id: `${channelId}-${start.getTime()}`,
-      title,
+      title: xmlTextContent(prog.title?.[0]),
       start,
       end: stop,
     };
 
-    // Initialize array for this channel if it doesn't exist
-    const bucket = getOrCreateProgramBucket(lookupKeys);
-    bucket.push(program);
+    getOrCreateProgramBucket(lookupKeys).push(program);
   }
 
   // Sort programs by start time for each channel
@@ -80,22 +120,19 @@ export async function parseEPG(xmlText: string, validChannelIds?: Set<string>): 
   return epgData;
 }
 
-function extractChannelLookupKeys(xmlDoc: Document): Record<string, string[]> {
+function extractChannelLookupKeys(channelElements: XmlChannel[]): Record<string, string[]> {
   const map: Record<string, string[]> = {};
-  const channelElements = xmlDoc.getElementsByTagName("channel");
 
-  for (let i = 0; i < channelElements.length; i++) {
-    const channel = channelElements[i];
-    const id = channel.getAttribute("id");
+  for (const channel of channelElements) {
+    const id = channel["@_id"];
     if (!id) {
       continue;
     }
 
-    const displayNameElements = channel.getElementsByTagName("display-name");
     const keys = [id];
     const seen = new Set(keys);
-    for (let j = 0; j < displayNameElements.length; j++) {
-      const displayName = displayNameElements[j].textContent?.trim();
+    for (const displayNameNode of channel["display-name"] ?? []) {
+      const displayName = xmlTextContent(displayNameNode)?.trim();
       if (displayName && !seen.has(displayName)) {
         keys.push(displayName);
         seen.add(displayName);
@@ -246,16 +283,37 @@ export function generateFallbackPrograms(
   const roundedHours = Math.floor(hoursSinceEpoch / 2) * 2;
   currentStart = new Date(roundedHours * 60 * 60 * 1000);
 
+  // Programs are sorted by start, and slots advance monotonically, so two cursors bound the
+  // candidates: `hi` grows past programs that start no later than the slot end, `lo` skips
+  // programs that lie entirely before the slot start (they cannot touch any later slot either).
+  // Each slot then only inspects the handful of programs in [lo, hi). Programs whose end
+  // precedes their start are malformed and never counted as overlapping.
+  let lo = 0;
+  let hi = 0;
+
   while (currentStart < now) {
     const currentEnd = new Date(currentStart.getTime() + TWO_HOURS_MS);
 
+    while (hi < existingPrograms.length && existingPrograms[hi].start <= currentEnd) {
+      hi++;
+    }
+    while (lo < hi && existingPrograms[lo].end < currentStart && existingPrograms[lo].start < currentStart) {
+      lo++;
+    }
+
     // Check if this time slot overlaps with any existing program
-    const hasOverlap = existingPrograms.some(
-      (p) =>
+    let hasOverlap = false;
+    for (let i = lo; i < hi; i++) {
+      const p = existingPrograms[i];
+      if (
         (p.start <= currentStart && p.end > currentStart) ||
         (p.start < currentEnd && p.end >= currentEnd) ||
-        (p.start >= currentStart && p.end <= currentEnd),
-    );
+        (p.start >= currentStart && p.end <= currentEnd)
+      ) {
+        hasOverlap = true;
+        break;
+      }
+    }
 
     if (!hasOverlap) {
       fallbackPrograms.push({
@@ -271,29 +329,42 @@ export function generateFallbackPrograms(
   return fallbackPrograms;
 }
 
+/** Merge two start-sorted program lists; on equal starts, entries from `a` come first. */
+function mergeSortedPrograms(a: EPGProgram[], b: EPGProgram[]): EPGProgram[] {
+  const merged: EPGProgram[] = new Array(a.length + b.length);
+  let i = 0;
+  let j = 0;
+  let k = 0;
+  while (i < a.length && j < b.length) {
+    merged[k++] = a[i].start.getTime() <= b[j].start.getTime() ? a[i++] : b[j++];
+  }
+  while (i < a.length) merged[k++] = a[i++];
+  while (j < b.length) merged[k++] = b[j++];
+  return merged;
+}
+
+/** Minimal channel shape needed to fill EPG gaps; safe to post to a Web Worker. */
+export interface EPGChannelDescriptor {
+  tvgId?: string;
+  tvgName?: string;
+  name: string;
+  hasCatchup: boolean;
+}
+
 /**
  * Fill gaps in EPG data with fallback programs
  * Only processes channels that have catchup support
  * @param epgData - Existing EPG data
- * @param channels - List of channels from M3U playlist
+ * @param channels - Channel descriptors derived from the M3U playlist
  * @param lookbackHours - How many hours back from now to generate fallback programs (default: 48)
  * @returns EPG data with gaps filled
  */
-export function fillEPGGaps(
-  epgData: EPGData,
-  channels: {
-    tvgId?: string;
-    tvgName?: string;
-    name: string;
-    sources?: { catchup?: string; catchupSource?: string }[];
-  }[],
-  lookbackHours: number = 72,
-): EPGData {
+export function fillEPGGaps(epgData: EPGData, channels: EPGChannelDescriptor[], lookbackHours: number = 72): EPGData {
   const filledData = { ...epgData };
 
   for (const channel of channels) {
     // Only process channels with catchup support
-    if (!channel.sources?.some((s) => s.catchup && s.catchupSource)) {
+    if (!channel.hasCatchup) {
       continue;
     }
 
@@ -318,10 +389,8 @@ export function fillEPGGaps(
     const fallbackPrograms = generateFallbackPrograms(existingPrograms, targetChannelId, lookbackHours);
 
     if (fallbackPrograms.length > 0) {
-      // Merge existing and fallback programs, then sort by start time
-      const mergedPrograms = [...existingPrograms, ...fallbackPrograms].sort(
-        (a, b) => a.start.getTime() - b.start.getTime(),
-      );
+      // Both lists are sorted by start time, so a linear merge keeps the result sorted
+      const mergedPrograms = mergeSortedPrograms(existingPrograms, fallbackPrograms);
 
       // Ensure all possible channel ID keys point to the same array
       filledData[targetChannelId] = mergedPrograms;
@@ -338,23 +407,4 @@ export function fillEPGGaps(
   }
 
   return filledData;
-}
-
-/**
- * Load EPG from URL with gzip support
- * @param url - URL to fetch EPG from
- * @param validChannelIds - Optional set of valid channel IDs from M3U to filter programs
- */
-export async function loadEPG(url: string, validChannelIds?: Set<string>): Promise<EPGData> {
-  try {
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Failed to fetch EPG: ${response.statusText}`);
-    }
-    const xmlText = await response.text();
-    return parseEPG(xmlText, validChannelIds);
-  } catch (error) {
-    console.error("Failed to load EPG:", error);
-    return {};
-  }
 }

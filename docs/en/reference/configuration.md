@@ -26,7 +26,7 @@ rtp2httpd [options]
 rtp2httpd --listen 5140 --listen 192.168.1.1:8081 --listen '[::1]:5140' --listen /var/run/rtp2httpd.sock
 ```
 
-Unix socket listen paths must be absolute and must not contain whitespace. At startup, if the same path already contains a socket file, rtp2httpd first probes whether the socket is still in use: if another process is listening on that path, startup is rejected; only confirmed stale socket files are removed automatically. If the path is a regular file, directory, or symbolic link, startup is rejected to avoid deleting user data. When any Unix socket listener is enabled, `zerocopy-on-send` is disabled globally.
+Unix socket listen paths must be absolute and must not contain whitespace. At startup, if the same path already contains a socket file, rtp2httpd first probes whether the socket is still in use: if another process is listening on that path, startup is rejected; only confirmed stale socket files are removed automatically. If the path is a regular file, directory, or symbolic link, startup is rejected to avoid deleting user data.
 
 #### Upstream Network Interface Configuration
 
@@ -53,10 +53,6 @@ Unix socket listen paths must be absolute and must not contain whitespace. At st
   - For 30 Mbps 4K IPTV streams, 512KB provides approximately 140ms of buffering
   - Increase this value to reduce packet loss for high-bandwidth streams
   - Actual buffer size may be limited by kernel parameter `net.core.rmem_max`
-- `-Z, --zerocopy-on-send` - Enable zero-copy send to improve performance (default: disabled)
-  - Requires kernel support for MSG_ZEROCOPY (Linux 4.14+)
-  - Improves throughput and reduces CPU usage on supported devices
-  - Not recommended if rtp2httpd is behind a reverse proxy (nginx/caddy/lucky, etc.)
 
 ### FCC (Fast Channel Change)
 
@@ -233,13 +229,6 @@ buffer-pool-max-size = 16384
 # Increase this value to reduce packet loss for high-bandwidth streams
 # Actual buffer size may be limited by kernel parameter net.core.rmem_max
 udp-rcvbuf-size = 524288
-
-# Enable zero-copy send to improve performance (default: no)
-# Set to yes/true/on/1 to enable zero-copy
-# Requires kernel support for MSG_ZEROCOPY (Linux 4.14+)
-# Can improve throughput and reduce CPU usage on supported devices, especially under high concurrent loads
-# Not recommended if rtp2httpd is behind a reverse proxy (nginx/caddy/lucky, etc.)
-zerocopy-on-send = no
 
 # Override the User-Agent for upstream HTTP proxy requests (default: no override)
 # When set, this replaces the client User-Agent sent to upstream servers for /http/ requests

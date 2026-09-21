@@ -8,12 +8,12 @@ import gzip
 import json
 import os
 import signal
+import socket
 import struct
 import time
 from urllib.parse import quote
 
 import pytest
-
 from helpers import (
     R2HProcess,
     find_free_port,
@@ -23,7 +23,6 @@ from helpers import (
     stream_get,
     write_temp_file,
 )
-
 
 APP_PREFIX = "/app/rtp2httpd"
 SAMPLE_EPG_XML = """\
@@ -123,7 +122,7 @@ class TestStatusPage:
     def test_status_contains_info(self, basic_r2h):
         """Status page should contain recognizable content.
         The embedded HTML may be gzip-compressed; request uncompressed."""
-        _, hdrs, body = http_get(
+        _, _hdrs, body = http_get(
             "127.0.0.1",
             basic_r2h.port,
             "/status",
@@ -353,6 +352,22 @@ class TestStatusSSE:
             ct = hdrs.get("content-type", "")
             assert "event-stream" in ct or "text/" in ct
 
+    def test_sse_ignores_input_after_request_storage_is_released(self, basic_r2h):
+        """A second request cannot re-enter a finished parser on an SSE connection."""
+        with socket.create_connection(("127.0.0.1", basic_r2h.port), timeout=4) as sock:
+            sock.sendall(b"GET /status/sse HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            with sock.makefile("rb") as response:
+                assert response.readline().startswith(b"HTTP/1.1 200")
+                while response.readline().strip():
+                    pass
+                sock.sendall(b"GET /status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                updates = 0
+                while updates < 3:
+                    line = response.readline()
+                    assert line, "SSE connection closed after late client input"
+                    assert not line.startswith(b"HTTP/"), "Late input was routed as another request"
+                    updates += line.startswith(b"data:")
+
 
 # ---------------------------------------------------------------------------
 # app-path-prefix
@@ -537,17 +552,31 @@ r2h-token = new-token
             assert r2h.process is not None
             os.kill(r2h.process.pid, signal.SIGHUP)
 
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 8
+            last_status = None
+            last_error = None
+            body = b""
             while True:
-                status, _, body = http_get(
-                    "127.0.0.1",
-                    port,
-                    "/new/status.webmanifest?r2h-token=new-token",
-                )
+                try:
+                    status, _, body = http_get(
+                        "127.0.0.1",
+                        port,
+                        "/new/status.webmanifest?r2h-token=new-token",
+                    )
+                    last_status = status
+                    last_error = None
+                except (OSError, TimeoutError) as exc:
+                    # Workers briefly drop the listen socket during SIGHUP reload.
+                    last_status = None
+                    last_error = exc
+                    status = 0
                 if status == 200:
                     break
                 if time.monotonic() >= deadline:
-                    raise AssertionError(f"reloaded manifest did not become available; last status was {status}")
+                    raise AssertionError(
+                        f"reloaded manifest did not become available; last status was {last_status}; "
+                        f"last error: {last_error}"
+                    )
                 time.sleep(0.05)
 
             manifest = _parse_manifest(body)

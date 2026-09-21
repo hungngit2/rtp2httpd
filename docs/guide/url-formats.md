@@ -38,6 +38,7 @@ http://192.168.1.1:5140/rtp/239.253.64.120:5140?fcc=10.255.14.152:15970&r2h-ifna
 - **fec**（可选）：FEC 前向纠错端口号，用于接收 FEC 冗余数据包来恢复丢包
 - **r2h-ifname**（可选）：指定使用的上游网络接口（覆盖全局配置）
 - **r2h-ifname-fcc**（可选）：指定 FCC 使用的上游网络接口（覆盖全局配置）
+- **r2h-filename**（可选）：下载文件名，详见 [下载文件名](#下载文件名)
 
 ### 使用场景
 
@@ -106,6 +107,19 @@ RTSP、普通组播和 FCC 流会在 HTTP Headers 带上以下 `R2H-*` Metadata�
 | `R2H-FCC-Type` | 已配置的 FCC 协议：`telecom` 或 `huawei`。 |
 | `R2H-FCC-Status` | 从 FCC 单播起播为 `active`；从组播起播为 `fallback`。 |
 
+## 下载文件名
+
+组播 RTP 和 RTSP 的 MPEG-TS 响应支持 `r2h-filename` 查询参数。参数非空时，rtp2httpd 会输出 `Content-Disposition: attachment`，让浏览器按指定文件名保存下载。服务端会去掉路径分隔符和控制字符，并在缺少后缀时补上 `.ts`。
+
+该参数只作用于 rtp2httpd 自身，不会转发给上游。HTTP/HLS 反向代理会在转发前剥离该参数，也不会设置 `Content-Disposition`。
+
+```url
+http://192.168.1.1:5140/rtp/239.253.64.120:5140?r2h-filename=CCTV-1.ts
+http://192.168.1.1:5140/rtsp/iptv.example.com:554/channel1?playseek=20240101120000-20240101130000&r2h-filename=CCTV-1_新闻联播_20240101-120000_20240101-130000.ts
+```
+
+内置 Web 播放器复制媒体直链时会自动带上该参数。
+
 ## HTTP 反向代理
 
 ```url
@@ -149,6 +163,21 @@ http://192.168.1.1:5140/http/iptv.example.com/channel1?r2h-ifname=eth0
 ```
 
 详见 [时间处理说明](./time-processing.md)。
+
+### 上游 30x 重定向
+
+当上游返回 `301` / `302` / `303` / `307` / `308` 时，rtp2httpd 会按协议改写 `Location`，让播放器继续走本实例：
+
+| 上游 `Location` | 转发给客户端 |
+| --- | --- |
+| `http://iptv.example.com:8080/path` | `/http/iptv.example.com:8080/path` |
+| `rtsp://iptv.example.com:554/path?auth=...` | `/rtsp/iptv.example.com:554/path?auth=...` |
+| `rtp://239.0.0.1:1234` | `/rtp/239.0.0.1:1234` |
+| `udp://239.0.0.1:1234` | `/udp/239.0.0.1:1234` |
+| `/rtsp/iptv.example.com:554/path`（根路径相对地址） | 原样转发 |
+| `https://...` 或其他未支持的协议 | 原样转发 |
+
+改写范围与 M3U 可识别的 URL 格式一致：`http://`、`rtsp://`、`rtp://`、`udp://`。这适用于 `catchup-source` 先指向一个 HTTP 鉴权/换链服务，再由该服务 302 到真实播放地址的场景。如果配置了 `app-path-prefix`，改写后的地址会带上此前缀。
 
 ### 注意事项
 
@@ -241,6 +270,8 @@ http://192.168.1.1:5140/status
 - 系统日志查看
 - 远程管理功能（强制断开连接、调整日志级别等）
 - 服务控制：重载配置、重启工作进程
+
+强制断开某个客户端时，rtp2httpd 会立即关闭该连接，并在随后 5 秒内拒绝该客户端 IP 的所有新连接（返回 `HTTP 429 Too Many Requests`，并带有 `Retry-After`），避免播放器立刻重连。
 
 **服务控制**（等效于向 supervisor 发送 Unix 信号）：
 

@@ -37,6 +37,7 @@ set(COMMON_SOURCES
   src/configuration.c
   src/access_log.c
   src/http.c
+  src/http_headers.c
   src/http_fetch.c
   src/service.c
   src/url_template.c
@@ -62,13 +63,14 @@ set(COMMON_SOURCES
   src/worker.c
   src/unix_socket.c
   src/buffer_pool.c
-  src/zerocopy.c
+  src/send_queue.c
   src/m3u.c
   src/epg.c
-  src/md5.c
-  src/hashmap.c
   src/embedded_web.c
   src/utils.c
+  src/vendor/hashmap/hashmap.c
+  src/vendor/md5/md5.c
+  src/vendor/picohttpparser/picohttpparser.c
 )
 
 # Platform-specific poller backend

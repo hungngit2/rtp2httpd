@@ -2,6 +2,20 @@
 
 rtp2httpd includes a modern web-based player that allows you to watch configured M3U channel lists directly in your browser without installing any client software.
 
+## Features
+
+- **Channel List**: Automatically loads configured M3U channel lists
+- **Live Streaming**: Watch live broadcasts directly in the browser
+- **Time-Shifted Playback**: Supports EPG (Electronic Program Guide) and time-shifted playback (requires catchup source)
+- **Fast Startup**: Achieves millisecond-level channel switching with FCC
+- **Seamless Channel Switching**: Preloads the new stream when switching channels to reduce black screens
+- **Responsive Design**: UI adapts to both desktop and mobile devices
+- **PWA Support**: Can be added to the home screen on phones, tablets, desktops, or LG webOS TVs for app-like quick access
+- **Zero Overhead**: Pure web frontend implementation with virtually no resource overhead on rtp2httpd (no decoding/transcoding overhead)
+
+> [!IMPORTANT]
+> The player relies on the browser's native decoding capabilities. Some encoding formats (such as E-AC3) may not play in certain browsers (manifested as no audio or black screen). We recommend using the latest versions of Chrome, Edge, or Safari.
+
 ## Access
 
 After configuring M3U playlists, access the player via your browser:
@@ -18,19 +32,27 @@ http://192.168.1.1:5140/player
 
 The player page path can be customized via the `player-page-path` configuration option. Setting it to `/` enables direct access without any path.
 
-## Features
+## Deep Links to Channels
 
-- **Channel List**: Automatically loads configured M3U channel lists
-- **Live Streaming**: Watch live broadcasts directly in the browser
-- **Time-Shifted Playback**: Supports EPG (Electronic Program Guide) and time-shifted playback (requires catchup source)
-- **Fast Startup**: Achieves millisecond-level channel switching with FCC
-- **Seamless Channel Switching**: Preloads the new stream when switching channels to reduce black screens
-- **Responsive Design**: UI adapts to both desktop and mobile devices
-- **PWA Support**: Can be added to the home screen on phones, tablets, desktops, or LG webOS TVs for app-like quick access
-- **Zero Overhead**: Pure web frontend implementation with virtually no resource overhead on rtp2httpd (no decoding/transcoding overhead)
+You can append `#<channel number>` or `#<channel name>` to the player URL to open a specific channel, which is useful for bookmarks or sharing with others:
 
-> [!IMPORTANT]
-> The player relies on the browser's native decoding capabilities. Some encoding formats (such as E-AC3) may not play in certain browsers (manifested as no audio or black screen). We recommend using the latest versions of Chrome, Edge, or Safari.
+```url
+http://server:port/player#5
+http://server:port/player#CCTV-1
+```
+
+The player automatically updates the address bar when you switch channels, so you can copy the link at any time to share the channel currently playing.
+
+## Copy Media Links
+
+Middle-click a channel in the channel list to copy that channel's live URL for the current source. Middle-click a program in the program guide to copy that program's catch-up URL (the channel must have `catchup-source` configured). A toast appears after a successful copy.
+
+The copied value is a directly requestable HTTP media URL, which you can download with FFmpeg, N_m3u8DL-RE, IDM, or open in a third-party player. For multi-source channels, the most recently used source is copied. If the current page includes `r2h-token`, the copied link includes that parameter as well.
+
+Multicast and RTSP links also include an `r2h-filename` query parameter. Its value is a `.ts` filename built from the channel name, source label, program title, and time range, so a browser download uses that name. See [URL Formats](/en/guide/url-formats#download-filename).
+
+> [!NOTE]
+> An on-air program with no catch-up source copies the live URL. A program that has not started and has no catch-up source cannot be copied.
 
 ## PWA Support and Add to Home Screen
 
@@ -73,12 +95,19 @@ LG webOS smart TVs can also use the built-in browser to open the player and pin 
 
 > [!NOTE]
 > If you customized the player path via `player-page-path`, use the actual path when adding to the home screen. The shortcut is pinned to the URL used at the time of adding, including query parameters such as `r2h-token` (if present).
+> You can also append `#<channel name>` or `#<channel number>` to the URL to pin the shortcut to a specific channel.
 
 ## Channel Aggregation
 
-When multiple channels with the **same group and same name** exist in the M3U, the player automatically aggregates them into multiple sources of one channel, displaying them only once in the channel list. Users can switch between different sources (such as different quality levels) using the source selector:
+In the M3U, a single `#EXTINF` line followed by multiple URL lines declares a channel with multiple sources. The player aggregates them into one channel, displaying it only once in the channel list, and users can switch between sources (such as different quality levels) using the source selector:
 
 ![Channel Source Selector](../../images/channel-source-selector.png)
+
+```m3u
+#EXTINF:-1 group-title="Satellite",Guangdong TV
+http://192.168.1.1:5140/rtp/239.253.64.96:5140$UHD
+http://192.168.1.1:5140/rtp/239.253.64.200:5140$HD
+```
 
 If a source URL has a `$label` suffix, the player extracts it as the source's display label (such as "UHD", "HD", "SD"). Sources without `$label` are displayed with sequential numbers (such as "Source 1", "Source 2").
 

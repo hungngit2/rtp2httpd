@@ -22,6 +22,7 @@ import { isNearLiveWallClock, type LiveSessionAnchor, mseToWallClock } from "../
 import type { Channel, EPGProgram } from "../../types/player";
 import { PLAYER_CONTROL_BUTTON_CLASS, PLAYER_OVERLAY_SURFACE_CLASS } from "./classnames";
 import { usePlaybackTime } from "./playback-time-context";
+import { PlayerEpgTimeline } from "./player-epg-timeline";
 import { PlayerMediaBadges } from "./player-media-badges";
 import { PlayerSelectedGlassLayers } from "./player-selected-glass-layers";
 
@@ -30,6 +31,8 @@ interface PlayerControlsProps {
   channel: Channel;
   // EPG program information
   currentProgram: EPGProgram | null;
+  // Every programme known for the current channel, for the EPG timeline band
+  epgPrograms?: readonly EPGProgram[];
   // Whether we're in live mode or catchup mode
   isLive: boolean;
   // Callback when user seeks to a new position
@@ -41,7 +44,6 @@ interface PlayerControlsProps {
   // Technical information for the currently visible player slot
   mediaInfo: PlayerMediaInfo | null;
   renderState: PlayerRenderState;
-  autoDeinterlace: boolean;
   // The absolute time of the last seek position (null for live mode)
   seekStartTime: Date;
   liveSessionAnchor: LiveSessionAnchor | null;
@@ -50,6 +52,8 @@ interface PlayerControlsProps {
   onPlayPause: () => void;
   volume: number;
   onVolumeChange: (volume: number) => void;
+  /** False where the platform makes volume read-only (iOS): the slider is hidden, mute stays. */
+  canControlVolume: boolean;
   isMuted: boolean;
   onMuteToggle: () => void;
   onFullscreen: () => void;
@@ -70,6 +74,9 @@ interface PlayerControlsProps {
 const COMPACT_BUTTON_CLASS = "[@container_video_(max-height:_320px)]:p-1 md:[@container_video_(max-height:_320px)]:p-1";
 const COMPACT_ICON_CLASS =
   "[@container_video_(max-height:_320px)]:h-4 [@container_video_(max-height:_320px)]:w-4 md:[@container_video_(max-height:_320px)]:h-4 md:[@container_video_(max-height:_320px)]:w-4";
+
+/** Shared identity, so a channel without guide data does not re-render the timeline band. */
+const NO_EPG_PROGRAMS: readonly EPGProgram[] = [];
 
 function formatTime(date: Date, withSeconds = false) {
   return date.toLocaleTimeString([], {
@@ -378,19 +385,20 @@ const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
 function PlayerControlsComponent({
   channel,
   currentProgram,
+  epgPrograms = NO_EPG_PROGRAMS,
   isLive,
   onSeek,
   onScrubbingChange,
   locale,
   mediaInfo,
   renderState,
-  autoDeinterlace,
   seekStartTime,
   liveSessionAnchor,
   isPlaying,
   onPlayPause,
   volume,
   onVolumeChange,
+  canControlVolume,
   isMuted,
   onMuteToggle,
   onFullscreen,
@@ -418,6 +426,18 @@ function PlayerControlsComponent({
         "[@container_video_(max-height:_320px)]:gap-0.5 [@container_video_(max-height:_320px)]:pt-2 [@container_video_(max-height:_320px)]:pb-0.5 md:[@container_video_(max-height:_320px)]:gap-0.5 md:[@container_video_(max-height:_320px)]:pt-2 md:[@container_video_(max-height:_320px)]:pb-0.5 [@container_video_(max-height:_220px)]:pt-1 md:[@container_video_(max-height:_220px)]:pt-1",
       )}
     >
+      {epgPrograms.length > 0 && (
+        <PlayerEpgTimeline
+          programs={epgPrograms}
+          locale={locale}
+          liveSessionAnchor={liveSessionAnchor}
+          onScrubbingChange={onScrubbingChange}
+          onSeek={onSeek}
+          seekStartTime={seekStartTime}
+          supportsCatchup={isCatchupSupported}
+        />
+      )}
+
       {hasTimeline && (
         <PlayerTimeline
           channel={channel}
@@ -470,39 +490,37 @@ function PlayerControlsComponent({
               )}
             </button>
 
-            {/* Volume Slider */}
-            <div
-              className={clsx(
-                PLAYER_OVERLAY_SURFACE_CLASS,
-                "player-performance-motion invisible absolute bottom-full left-1/2 flex -translate-x-1/2 cursor-pointer items-center justify-center rounded-xl px-2 py-2 opacity-0 transition-[opacity,visibility] duration-150 group-hover/volume:visible group-hover/volume:opacity-100 group-focus-within/volume:visible group-focus-within/volume:opacity-100 md:px-3",
-              )}
-            >
-              <PlayerSelectedGlassLayers compact />
-              <input
-                type="range"
-                min="0"
-                max="1"
-                step="0.01"
-                value={isMuted ? 0 : volume}
-                onChange={(e) => onVolumeChange(parseFloat(e.target.value))}
-                className="relative z-10 m-0 block h-16 w-1 cursor-pointer appearance-none bg-transparent [writing-mode:vertical-lr] [direction:rtl] md:h-20"
-                style={{
-                  background: `linear-gradient(to top, #3b82f6 0%, #6366f1 ${(isMuted ? 0 : volume) * 100}%, rgba(219,234,254,0.18) ${(isMuted ? 0 : volume) * 100}%, rgba(219,234,254,0.18) 100%)`,
-                }}
-              />
-            </div>
+            {/* Volume Slider — omitted where the platform ignores volume writes (iOS),
+                since it would move without changing anything. Mute still works there. */}
+            {canControlVolume && (
+              <div
+                className={clsx(
+                  PLAYER_OVERLAY_SURFACE_CLASS,
+                  "player-performance-motion invisible absolute bottom-full left-1/2 flex -translate-x-1/2 cursor-pointer items-center justify-center rounded-xl px-2 py-2 opacity-0 transition-[opacity,visibility] duration-150 group-hover/volume:visible group-hover/volume:opacity-100 group-focus-within/volume:visible group-focus-within/volume:opacity-100 md:px-3",
+                )}
+              >
+                <PlayerSelectedGlassLayers compact />
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.01"
+                  value={isMuted ? 0 : volume}
+                  onChange={(e) => onVolumeChange(parseFloat(e.target.value))}
+                  className="relative z-10 m-0 block h-16 w-1 cursor-pointer appearance-none bg-transparent [writing-mode:vertical-lr] [direction:rtl] md:h-20"
+                  style={{
+                    background: `linear-gradient(to top, #3b82f6 0%, #6366f1 ${(isMuted ? 0 : volume) * 100}%, rgba(219,234,254,0.18) ${(isMuted ? 0 : volume) * 100}%, rgba(219,234,254,0.18) 100%)`,
+                  }}
+                />
+              </div>
+            )}
           </div>
 
           <PlayerTimeDisplay currentProgram={currentProgram} seekStartTime={seekStartTime} />
 
           {showMediaBadges && (
             <div className="ml-1 mr-1 flex h-7 min-w-0 basis-0 flex-1 items-center overflow-hidden md:ml-2 md:mr-2 md:h-12">
-              <PlayerMediaBadges
-                mediaInfo={mediaInfo}
-                locale={locale}
-                renderState={renderState}
-                autoDeinterlace={autoDeinterlace}
-              />
+              <PlayerMediaBadges mediaInfo={mediaInfo} locale={locale} renderState={renderState} />
             </div>
           )}
         </div>

@@ -46,6 +46,28 @@ The following firmware distributions and platforms include rtp2httpd, or offer i
 - [AutoBuildImmortalWrt](https://github.com/wukongdaily/AutoBuildImmortalWrt): rtp2httpd is built into [store](https://github.com/wukongdaily/store) for easy builds
 - [Pandora QWRT for K2P](https://www.right.com.cn/forum/forum.php?mod=viewthread&tid=8346913&fromuid=402348): rtp2httpd is built in
 
+## Homebrew Deployment
+
+On macOS and Linux, you can install rtp2httpd using [Homebrew](https://brew.sh):
+
+```bash
+brew install rtp2httpd
+```
+
+After installation, edit the configuration file at `$(brew --prefix)/etc/rtp2httpd.conf`, then start the service (and register it to start automatically when the user logs in after boot):
+
+```bash
+brew services start rtp2httpd
+```
+
+To start automatically at system boot without requiring a user to log in, use sudo:
+
+```bash
+# Stop the user service first if it was previously started to avoid duplicate instances
+brew services stop rtp2httpd
+sudo brew services start rtp2httpd
+```
+
 ## Static Binary Deployment
 
 Download the static binary file `rtp2httpd-<version>-<arch>` for your architecture from the [Releases](https://github.com/stackia/rtp2httpd/releases) page, upload to your device, `chmod +x` and run.
@@ -72,6 +94,44 @@ chmod +x rtp2httpd-X.Y.Z-x86_64
 > [!TIP]
 > You can use this example file [rtp2httpd.conf](https://github.com/stackia/rtp2httpd/blob/main/rtp2httpd.conf) as a base to modify your configuration. See [Configuration Reference](/en/reference/configuration) for details.
 
+On systems using systemd, such as Debian/Ubuntu, you can create a systemd service unit by adding the following content to `/etc/systemd/system/rtp2httpd.service`.
+
+```text
+[Unit]
+Description=rtp2httpd - Multicast RTP/RTSP to Unicast HTTP stream converter
+Documentation=https://github.com/stackia/rtp2httpd
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# The path in ExecStart must match the actual installation location; you can verify it with `command -v rtp2httpd` or `which rtp2httpd`.
+# ExecStart=/usr/local/bin/rtp2httpd --config /etc/rtp2httpd.conf
+ExecStart=/opt/rtp2httpd/rtp2httpd --config /opt/rtp2httpd/rtp2httpd.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=3s
+# It is recommended to run as a dedicated non-root user, which can be created via `useradd --system --no-create-home --shell /usr/sbin/nologin rtp2httpd`
+User=rtp2httpd
+Group=rtp2httpd
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Once the file has been created, use the following commands to start the rtp2httpd service.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now rtp2httpd
+sudo systemctl status rtp2httpd
+```
+
 ## Docker Container Deployment
 
 Suitable for Docker-capable devices. **Requires host network mode** to properly receive multicast streams.
@@ -79,7 +139,7 @@ Suitable for Docker-capable devices. **Requires host network mode** to properly 
 ### Basic Startup
 
 ```bash
-docker run --network=host --cap-add=NET_ADMIN --ulimit memlock=-1:-1 --rm \
+docker run --network=host --cap-add=NET_ADMIN --rm \
   ghcr.io/stackia/rtp2httpd:latest \
   --noconfig --verbose 2 --listen 5140 --maxclients 20
 ```
@@ -94,10 +154,6 @@ services:
     restart: always
     cap_add:
       - NET_ADMIN
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
     command: --noconfig --verbose 2 --listen 5140 --maxclients 20
 ```
 
@@ -105,14 +161,13 @@ services:
 > **About recommended parameters**:
 >
 > - `cap_add: NET_ADMIN`: Allows bypassing the kernel parameter `net.core.rmem_max` limit via `SO_RCVBUFFORCE`, setting a larger UDP receive buffer
-> - `ulimits: memlock: -1`: Required when zero-copy is enabled (`--zerocopy-on-send`), MSG_ZEROCOPY needs to lock memory pages
 
 ### Mount Configuration File
 
 If you need to use a configuration file (assuming config file is at `/path/to/rtp2httpd.conf`):
 
 ```bash
-docker run --network=host --cap-add=NET_ADMIN --ulimit memlock=-1:-1 --rm \
+docker run --network=host --cap-add=NET_ADMIN --rm \
   -v /path/to/rtp2httpd.conf:/usr/local/etc/rtp2httpd.conf:ro \
   ghcr.io/stackia/rtp2httpd:latest
 ```

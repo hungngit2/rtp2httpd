@@ -47,6 +47,28 @@ curl -fsSL https://raw.githubusercontent.com/stackia/rtp2httpd/main/scripts/inst
 - [AutoBuildImmortalWrt](https://github.com/wukongdaily/AutoBuildImmortalWrt)：[store](https://github.com/wukongdaily/store) 已内置 rtp2httpd，轻松构建
 - [潘多拉 QWRT for K2P](https://www.right.com.cn/forum/forum.php?mod=viewthread&tid=8346913&fromuid=402348)：已内置 rtp2httpd
 
+## Homebrew 部署
+
+在 macOS 和 Linux 上，可以通过 [Homebrew](https://brew.sh) 安装 rtp2httpd：
+
+```bash
+brew install rtp2httpd
+```
+
+安装后，编辑 `$(brew --prefix)/etc/rtp2httpd.conf` 配置文件，然后启动服务（并注册开机用户登录后自启）：
+
+```bash
+brew services start rtp2httpd
+```
+
+如果需要在系统开机时自启（无需用户登录），需要使用 sudo：
+
+```bash
+# 如果之前已启动用户级服务，先停止，避免重复运行
+brew services stop rtp2httpd
+sudo brew services start rtp2httpd
+```
+
 ## 静态二进制文件部署
 
 从 [Releases](https://github.com/stackia/rtp2httpd/releases) 页面下载对应架构的静态二进制文件 `rtp2httpd-<版本号>-<架构>`，上传到设备并 `chmod +x` 后即可运行。
@@ -73,6 +95,44 @@ chmod +x rtp2httpd-X.Y.Z-x86_64
 > [!TIP]
 > 你可以使用这个示例文件 [rtp2httpd.conf](https://github.com/stackia/rtp2httpd/blob/main/rtp2httpd.conf) 作为基础来修改配置。具体说明见 [配置参数详解](../reference/configuration.md)。
 
+对于 Debian/Ubuntu 等使用 systemd 的系统，您可以在 `/etc/systemd/system/rtp2httpd.service` 内添加以下内容以创建 systemd 服务单元。
+
+```text
+[Unit]
+Description=rtp2httpd - Multicast RTP/RTSP to Unicast HTTP stream converter
+Documentation=https://github.com/stackia/rtp2httpd
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# ExecStart 中的路径需与实际安装位置一致，可用 `command -v rtp2httpd` 或 `which rtp2httpd` 确认。
+# ExecStart=/usr/local/bin/rtp2httpd --config /etc/rtp2httpd.conf
+ExecStart=/opt/rtp2httpd/rtp2httpd --config /opt/rtp2httpd/rtp2httpd.conf
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=3s
+# 建议以非 root 专用用户运行，可通过 `useradd --system --no-create-home --shell /usr/sbin/nologin rtp2httpd` 创建用户
+User=rtp2httpd
+Group=rtp2httpd
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+```
+
+文件创建完成后使用以下指令启动 rtp2httpd 服务。
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now rtp2httpd
+sudo systemctl status rtp2httpd
+```
+
 ## Docker 容器部署
 
 适用于支持 Docker 的设备。**需要使用 host 网络模式**以正确接收组播流。
@@ -80,7 +140,7 @@ chmod +x rtp2httpd-X.Y.Z-x86_64
 ### 基本启动方式
 
 ```bash
-docker run --network=host --cap-add=NET_ADMIN --ulimit memlock=-1:-1 --rm \
+docker run --network=host --cap-add=NET_ADMIN --rm \
   ghcr.io/stackia/rtp2httpd:latest \
   --noconfig --verbose 2 --listen 5140 --maxclients 20
 ```
@@ -95,10 +155,6 @@ services:
     restart: always
     cap_add:
       - NET_ADMIN
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
     command: --noconfig --verbose 2 --listen 5140 --maxclients 20
 ```
 
@@ -106,14 +162,13 @@ services:
 > **关于推荐参数**：
 >
 > - `cap_add: NET_ADMIN`：允许通过 `SO_RCVBUFFORCE` 绕过内核参数 `net.core.rmem_max` 限制，设置更大的 UDP 接收缓冲区
-> - `ulimits: memlock: -1`：启用零拷贝（`--zerocopy-on-send`）时必需，MSG_ZEROCOPY 需要锁定内存页
 
 ### 挂载配置文件
 
 如果需要使用配置文件（假设配置文件位于 `/path/to/rtp2httpd.conf`）：
 
 ```bash
-docker run --network=host --cap-add=NET_ADMIN --ulimit memlock=-1:-1 --rm \
+docker run --network=host --cap-add=NET_ADMIN --rm \
   -v /path/to/rtp2httpd.conf:/usr/local/etc/rtp2httpd.conf:ro \
   ghcr.io/stackia/rtp2httpd:latest
 ```
