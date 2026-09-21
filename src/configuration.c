@@ -9,12 +9,10 @@
 #include <getopt.h>
 #include <libgen.h>
 #include <net/if.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <unistd.h>
 
 #define MAX_LINE 4096
 
@@ -32,9 +30,6 @@ int cmd_bind_set = 0;
 int cmd_hostname_set = 0;
 int cmd_xff_set = 0;
 int cmd_r2h_token_set = 0;
-int cmd_web_auth_user_set = 0;
-int cmd_web_auth_password_set = 0;
-int cmd_web_auth_require_local_set = 0;
 int cmd_buffer_pool_max_size_set = 0;
 int cmd_udp_rcvbuf_size_set = 0;
 int cmd_mcast_rejoin_interval_set = 0;
@@ -49,7 +44,6 @@ int cmd_upstream_interface_http_set = 0;
 int cmd_fcc_listen_port_range_set = 0;
 int cmd_status_page_path_set = 0;
 int cmd_player_page_path_set = 0;
-int cmd_setting_page_path_set = 0;
 int cmd_app_path_prefix_set = 0;
 int cmd_use_relative_path_in_m3u_set = 0;
 int cmd_workers_set = 0;
@@ -70,10 +64,6 @@ enum long_option_e {
   OPT_USE_RELATIVE_PATH_IN_M3U,
   OPT_ACCESS_LOG,
   OPT_LOG_FORMAT,
-  OPT_SETTING_PAGE_PATH,
-  OPT_WEB_AUTH_USER,
-  OPT_WEB_AUTH_PASSWORD,
-  OPT_WEB_AUTH_REQUIRE_LOCAL,
   OPT_PID_FILE
 };
 
@@ -127,10 +117,6 @@ static void free_config_strings(config_t *target, bool force_free) {
     safe_free_string(&target->hostname);
   if (!cmd_r2h_token_set || force_free)
     safe_free_string(&target->r2h_token);
-  if (!cmd_web_auth_user_set || force_free)
-    safe_free_string(&target->web_auth_user);
-  if (!cmd_web_auth_password_set || force_free)
-    safe_free_string(&target->web_auth_password);
   if (!cmd_ffmpeg_path_set || force_free)
     safe_free_string(&target->ffmpeg_path);
   if (!cmd_ffmpeg_args_set || force_free)
@@ -142,11 +128,6 @@ static void free_config_strings(config_t *target, bool force_free) {
   if (!cmd_player_page_path_set || force_free) {
     safe_free_string(&target->player_page_path);
     safe_free_string(&target->player_page_route);
-  }
-
-  if (!cmd_setting_page_path_set || force_free) {
-    safe_free_string(&target->setting_page_path);
-    safe_free_string(&target->setting_page_route);
   }
   if (!cmd_app_path_prefix_set || force_free) {
     safe_free_string(&target->app_path_prefix);
@@ -322,10 +303,6 @@ static void set_status_page_path_value(const char *value) {
 
 static void set_player_page_path_value(const char *value) {
   set_page_path_value(value, "player", &config.player_page_path, &config.player_page_route);
-}
-
-static void set_setting_page_path_value(const char *value) {
-  set_page_path_value(value, "setting", &config.setting_page_path, &config.setting_page_route);
 }
 
 static void set_app_path_prefix_value(const char *value) {
@@ -660,12 +637,6 @@ void parse_global_sec(char *line) {
     return;
   }
 
-  if (strcasecmp("setting-page-path", param) == 0) {
-    if (set_if_not_cmd_override(cmd_setting_page_path_set, "setting-page-path"))
-      set_setting_page_path_value(value);
-    return;
-  }
-
   if (strcasecmp("app-path-prefix", param) == 0) {
     if (set_if_not_cmd_override(cmd_app_path_prefix_set, "app-path-prefix"))
       set_app_path_prefix_value(value);
@@ -677,28 +648,6 @@ void parse_global_sec(char *line) {
       safe_free_string(&config.r2h_token);
       config.r2h_token = strdup(value);
     }
-    return;
-  }
-
-  if (strcasecmp("web-auth-user", param) == 0) {
-    if (set_if_not_cmd_override(cmd_web_auth_user_set, "web-auth-user")) {
-      safe_free_string(&config.web_auth_user);
-      config.web_auth_user = strdup(value);
-    }
-    return;
-  }
-
-  if (strcasecmp("web-auth-password", param) == 0) {
-    if (set_if_not_cmd_override(cmd_web_auth_password_set, "web-auth-password")) {
-      safe_free_string(&config.web_auth_password);
-      config.web_auth_password = strdup(value);
-    }
-    return;
-  }
-
-  if (strcasecmp("web-auth-require-local", param) == 0) {
-    if (set_if_not_cmd_override(cmd_web_auth_require_local_set, "web-auth-require-local"))
-      config.web_auth_require_local = parse_bool(value);
     return;
   }
 
@@ -1104,16 +1053,12 @@ int config_snapshot(config_t *snapshot) {
   *snapshot = config;
   snapshot->hostname = NULL;
   snapshot->r2h_token = NULL;
-  snapshot->web_auth_user = NULL;
-  snapshot->web_auth_password = NULL;
   snapshot->ffmpeg_path = NULL;
   snapshot->ffmpeg_args = NULL;
   snapshot->status_page_path = NULL;
   snapshot->status_page_route = NULL;
   snapshot->player_page_path = NULL;
   snapshot->player_page_route = NULL;
-  snapshot->setting_page_path = NULL;
-  snapshot->setting_page_route = NULL;
   snapshot->app_path_prefix = NULL;
   snapshot->app_path_route = NULL;
   snapshot->external_m3u_url = NULL;
@@ -1133,16 +1078,12 @@ int config_snapshot(config_t *snapshot) {
 
   SNAPSHOT_STRING(hostname, cmd_hostname_set);
   SNAPSHOT_STRING(r2h_token, cmd_r2h_token_set);
-  SNAPSHOT_STRING(web_auth_user, cmd_web_auth_user_set);
-  SNAPSHOT_STRING(web_auth_password, cmd_web_auth_password_set);
   SNAPSHOT_STRING(ffmpeg_path, cmd_ffmpeg_path_set);
   SNAPSHOT_STRING(ffmpeg_args, cmd_ffmpeg_args_set);
   SNAPSHOT_STRING(status_page_path, cmd_status_page_path_set);
   SNAPSHOT_STRING(status_page_route, cmd_status_page_path_set);
   SNAPSHOT_STRING(player_page_path, cmd_player_page_path_set);
   SNAPSHOT_STRING(player_page_route, cmd_player_page_path_set);
-  SNAPSHOT_STRING(setting_page_path, cmd_setting_page_path_set);
-  SNAPSHOT_STRING(setting_page_route, cmd_setting_page_path_set);
   SNAPSHOT_STRING(app_path_prefix, cmd_app_path_prefix_set);
   SNAPSHOT_STRING(app_path_route, cmd_app_path_prefix_set);
   SNAPSHOT_STRING(external_m3u_url, cmd_external_m3u_url_set);
@@ -1200,8 +1141,6 @@ void config_init(void) {
     config.udp_rcvbuf_size = 512 * 1024; /* 512KB default */
   if (!cmd_xff_set)
     config.xff = 0;
-  if (!cmd_web_auth_require_local_set)
-    config.web_auth_require_local = 0;
   if (!cmd_video_snapshot_set)
     config.video_snapshot = 0;
   if (!cmd_mcast_rejoin_interval_set)
@@ -1224,8 +1163,6 @@ void config_init(void) {
     set_status_page_path_value("/status");
   if (!cmd_player_page_path_set)
     set_player_page_path_value("/player");
-  if (!cmd_setting_page_path_set)
-    set_setting_page_path_value("/setting");
   if (!cmd_app_path_prefix_set)
     set_app_path_prefix_value("");
   if (!cmd_log_format_set)
@@ -1370,14 +1307,6 @@ void usage(FILE *f, char *progname) {
           "/status)\n"
           "\t-p --player-page-path <path>  HTTP path for player UI (default: "
           "/player)\n"
-          "\t   --setting-page-path <path>  HTTP path for settings UI (default: "
-          "/setting)\n"
-          "\t   --web-auth-user <user>  HTTP Basic Auth username for "
-          "/status,/player,/setting from non-local clients (default: disabled)\n"
-          "\t   --web-auth-password <password>  HTTP Basic Auth password "
-          "(default: disabled)\n"
-          "\t   --web-auth-require-local  Also require HTTP Basic Auth for "
-          "local/LAN clients (default: off, local bypasses auth)\n"
           "\t   --app-path-prefix <path>  Public mount path prefix for all HTTP "
           "resources (default: none)\n"
           "\t   --use-relative-path-in-m3u  Use root-relative URLs in generated "
@@ -1467,10 +1396,6 @@ void parse_cmd_line(int argc, char *argv[]) {
                                     {"video-snapshot", no_argument, 0, 'S'},
                                     {"status-page-path", required_argument, 0, 's'},
                                     {"player-page-path", required_argument, 0, 'p'},
-                                    {"setting-page-path", required_argument, 0, OPT_SETTING_PAGE_PATH},
-                                    {"web-auth-user", required_argument, 0, OPT_WEB_AUTH_USER},
-                                    {"web-auth-password", required_argument, 0, OPT_WEB_AUTH_PASSWORD},
-                                    {"web-auth-require-local", no_argument, 0, OPT_WEB_AUTH_REQUIRE_LOCAL},
                                     {"app-path-prefix", required_argument, 0, OPT_APP_PATH_PREFIX},
                                     {"use-relative-path-in-m3u", no_argument, 0, OPT_USE_RELATIVE_PATH_IN_M3U},
                                     {"external-m3u", required_argument, 0, 'M'},
@@ -1601,24 +1526,6 @@ void parse_cmd_line(int argc, char *argv[]) {
     case 'p':
       set_player_page_path_value(optarg);
       cmd_player_page_path_set = 1;
-      break;
-    case OPT_SETTING_PAGE_PATH:
-      set_setting_page_path_value(optarg);
-      cmd_setting_page_path_set = 1;
-      break;
-    case OPT_WEB_AUTH_USER:
-      safe_free_string(&config.web_auth_user);
-      config.web_auth_user = strdup(optarg);
-      cmd_web_auth_user_set = 1;
-      break;
-    case OPT_WEB_AUTH_PASSWORD:
-      safe_free_string(&config.web_auth_password);
-      config.web_auth_password = strdup(optarg);
-      cmd_web_auth_password_set = 1;
-      break;
-    case OPT_WEB_AUTH_REQUIRE_LOCAL:
-      config.web_auth_require_local = 1;
-      cmd_web_auth_require_local_set = 1;
       break;
     case OPT_APP_PATH_PREFIX:
       set_app_path_prefix_value(optarg);
@@ -1762,250 +1669,4 @@ void parse_cmd_line(int argc, char *argv[]) {
   }
 
   logger(LOG_DEBUG, "Verbosity: %d, Maxclients: %d, Workers: %d", config.verbosity, config.maxclients, config.workers);
-}
-
-/* True if `line` is an ACTIVE (non-commented) assignment for `key`. Commented
- * example/alternative lines (starting with ';' or '#') are never matched, so
- * they're preserved untouched as documentation. */
-static int line_is_active_key(const char *line, const char *key) {
-  const char *p = line;
-  size_t key_len = strlen(key);
-
-  while (*p == ' ' || *p == '\t')
-    p++;
-  if (*p == ';' || *p == '#')
-    return 0;
-  if (strncasecmp(p, key, key_len) != 0)
-    return 0;
-  p += key_len;
-  while (*p == ' ' || *p == '\t')
-    p++;
-  return *p == '=' || *p == '\0';
-}
-
-/* Appends formatted output to a dynamically-growing buffer, reallocating as
- * needed. Returns 0 on success, -1 on formatting or allocation failure. */
-static int out_append(char **out, size_t *out_cap, size_t *out_len, const char *fmt, ...) {
-  va_list args;
-  int needed;
-
-  va_start(args, fmt);
-  needed = vsnprintf(NULL, 0, fmt, args);
-  va_end(args);
-  if (needed < 0)
-    return -1;
-
-  if (*out_len + (size_t)needed + 1 > *out_cap) {
-    size_t new_cap = *out_cap * 2;
-    char *new_out;
-    while (new_cap < *out_len + (size_t)needed + 1)
-      new_cap *= 2;
-    new_out = realloc(*out, new_cap);
-    if (!new_out)
-      return -1;
-    *out = new_out;
-    *out_cap = new_cap;
-  }
-
-  va_start(args, fmt);
-  vsnprintf(*out + *out_len, *out_cap - *out_len, fmt, args);
-  va_end(args);
-  *out_len += (size_t)needed;
-  return 0;
-}
-
-int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size_t n_kvs, const char **listen_lines,
-                                 size_t n_listen) {
-  char *content;
-  size_t content_len;
-  long size = 0;
-  FILE *f = fopen(path, "r");
-
-  if (f) {
-    fseek(f, 0, SEEK_END);
-    size = ftell(f);
-    if (size < 0) {
-      fclose(f);
-      return -1;
-    }
-    fseek(f, 0, SEEK_SET);
-    content = malloc((size_t)size + 1);
-    if (!content) {
-      fclose(f);
-      return -1;
-    }
-    if (fread(content, 1, (size_t)size, f) != (size_t)size) {
-      fclose(f);
-      free(content);
-      return -1;
-    }
-    content[size] = '\0';
-    content_len = (size_t)size;
-    fclose(f);
-  } else {
-    content = strdup("[global]\n");
-    if (!content)
-      return -1;
-    content_len = strlen(content);
-  }
-
-  int *applied = calloc(n_kvs > 0 ? n_kvs : 1, sizeof(int));
-  if (!applied) {
-    free(content);
-    return -1;
-  }
-
-  size_t out_cap = (size_t)size + 65536;
-  char *out = malloc(out_cap);
-  if (!out) {
-    free(content);
-    free(applied);
-    return -1;
-  }
-  size_t out_len = 0;
-
-/* All OUT_APPEND call sites below run before `content`/`applied` are freed,
- * so the cleanup is identical everywhere. */
-#define OUT_APPEND(...)                                                                                                \
-  do {                                                                                                                 \
-    if (out_append(&out, &out_cap, &out_len, __VA_ARGS__) != 0) {                                                      \
-      free(content);                                                                                                   \
-      free(applied);                                                                                                   \
-      free(out);                                                                                                       \
-      return -1;                                                                                                       \
-    }                                                                                                                  \
-  } while (0)
-
-  int in_global = 0, in_bind = 0, has_global = 0, has_bind = 0;
-  /* Manual line splitting (not strtok_r): strtok_r treats runs of
-   * consecutive delimiters as one, silently dropping blank lines, which
-   * would violate byte-for-byte preservation of the rest of the file. */
-  char *content_end = content + content_len;
-  char *line = content;
-
-  while (line < content_end) {
-    char *next_nl = strchr(line, '\n');
-    if (next_nl)
-      *next_nl = '\0';
-
-    const char *t = line;
-    while (*t == ' ' || *t == '\t')
-      t++;
-
-    if (t[0] == '[') {
-      if (in_global) {
-        for (size_t i = 0; i < n_kvs; i++) {
-          if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
-            OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
-            applied[i] = 1;
-          }
-        }
-      }
-      if (in_bind) {
-        for (size_t i = 0; i < n_listen; i++)
-          OUT_APPEND("%s\n", listen_lines[i]);
-        if (n_listen == 0)
-          OUT_APPEND("* 5140\n");
-      }
-
-      in_global = strncasecmp(t, "[global]", 8) == 0;
-      in_bind = strncasecmp(t, "[bind]", 6) == 0;
-      if (in_global)
-        has_global = 1;
-      if (in_bind)
-        has_bind = 1;
-
-      OUT_APPEND("%s\n", line);
-      line = next_nl ? next_nl + 1 : content_end;
-      continue;
-    }
-
-    if (in_bind) {
-      line = next_nl ? next_nl + 1 : content_end;
-      continue;
-    }
-
-    if (in_global) {
-      int matched = 0;
-      for (size_t i = 0; i < n_kvs; i++) {
-        if (line_is_active_key(t, kvs[i].key)) {
-          matched = 1;
-          if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
-            OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
-          }
-          applied[i] = 1;
-          break;
-        }
-      }
-      if (matched) {
-        line = next_nl ? next_nl + 1 : content_end;
-        continue;
-      }
-    }
-
-    OUT_APPEND("%s\n", line);
-    line = next_nl ? next_nl + 1 : content_end;
-  }
-
-  if (in_global) {
-    for (size_t i = 0; i < n_kvs; i++) {
-      if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
-        OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
-        applied[i] = 1;
-      }
-    }
-  }
-  if (in_bind) {
-    for (size_t i = 0; i < n_listen; i++)
-      OUT_APPEND("%s\n", listen_lines[i]);
-    if (n_listen == 0)
-      OUT_APPEND("* 5140\n");
-  }
-
-  if (!has_global) {
-    OUT_APPEND("[global]\n");
-    for (size_t i = 0; i < n_kvs; i++) {
-      if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
-        OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
-        applied[i] = 1;
-      }
-    }
-  }
-
-  if (!has_bind) {
-    OUT_APPEND("[bind]\n");
-    for (size_t i = 0; i < n_listen; i++)
-      OUT_APPEND("%s\n", listen_lines[i]);
-    if (n_listen == 0)
-      OUT_APPEND("* 5140\n");
-  }
-
-#undef OUT_APPEND
-
-  free(content);
-  free(applied);
-
-  char tmp_path[1024];
-  snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
-  FILE *out_f = fopen(tmp_path, "w");
-  if (!out_f) {
-    free(out);
-    return -1;
-  }
-  size_t written = fwrite(out, 1, out_len, out_f);
-  fflush(out_f);
-  fsync(fileno(out_f));
-  fclose(out_f);
-  free(out);
-
-  if (written != out_len) {
-    unlink(tmp_path);
-    return -1;
-  }
-  if (rename(tmp_path, path) != 0) {
-    unlink(tmp_path);
-    return -1;
-  }
-
-  return 0;
 }
