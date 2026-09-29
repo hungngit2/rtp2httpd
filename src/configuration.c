@@ -1144,7 +1144,7 @@ void config_init(void) {
   if (!cmd_video_snapshot_set)
     config.video_snapshot = 0;
   if (!cmd_mcast_rejoin_interval_set)
-    config.mcast_rejoin_interval = 0;
+    config.mcast_rejoin_interval = 30;
   if (!cmd_use_relative_path_in_m3u_set)
     config.use_relative_path_in_m3u = 0;
   if (!cmd_fcc_listen_port_range_set) {
