@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=rtp2httpd
 
-RELEASE_VERSION:=3.17.1
+RELEASE_VERSION:=1.0.5
 
 PKG_VERSION:=$(shell echo "$(RELEASE_VERSION)" | sed 's/-\([a-z]*\)\.\([0-9]*\)/_\1\2/g')
 PKG_RELEASE:=1
@@ -15,8 +15,8 @@ PKG_FIXUP:=cmake
 export RELEASE_VERSION
 
 PKG_SOURCE:=rtp2httpd-v$(RELEASE_VERSION).tar.gz
-PKG_SOURCE_URL:=https://codeload.github.com/stackia/rtp2httpd/tar.gz/v$(RELEASE_VERSION)?
-PKG_HASH:=80a79f148f8a6fc412dcfe2d45b4b552869a4a98f21b3128eafe75933580a740
+PKG_SOURCE_URL:=https://codeload.github.com/hungngit2/rtp2httpd/tar.gz/v$(RELEASE_VERSION)?
+PKG_HASH:=ec4c96618e2a0d930be79744951c5fbc1a030cced3097b23d1cc8a9aa065667c
 
 include $(INCLUDE_DIR)/package.mk
 include $(INCLUDE_DIR)/cmake.mk
