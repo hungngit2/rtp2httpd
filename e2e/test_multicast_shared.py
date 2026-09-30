@@ -288,7 +288,10 @@ def test_shared_source_timeout_releases_all_subscribers(shared_source_r2h):
     path = f"/rtp/{MCAST_ADDR}:{find_free_udp_port()}"
     with ExitStack() as stack:
         clients = [
-            stack.enter_context(closing(http.client.HTTPConnection("127.0.0.1", r2h.port, timeout=10))) for _ in range(2)
+            stack.enter_context(
+                closing(http.client.HTTPConnection("127.0.0.1", r2h.port, timeout=10))
+            )
+            for _ in range(2)
         ]
         for client in clients:
             client.request("GET", path)
