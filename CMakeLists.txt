@@ -59,6 +59,8 @@ set(COMMON_SOURCES
   src/timezone.c
   src/status.c
   src/connection.c
+  src/fork_web.c
+  src/settings_api.c
   src/worker.c
   src/unix_socket.c
   src/buffer_pool.c

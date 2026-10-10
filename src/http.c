@@ -379,6 +379,7 @@ static int http_request_append_raw_header(http_request_t *req, const struct phr_
 static void http_request_consume_header(http_request_t *req, const struct phr_header *header) {
   if (!header->name)
     return;
+  fork_http_consume_header(&req->fork, header);
 
   /* Save raw headers for proxy forwarding (exclude Host, Connection,
    * Content-Length, Transfer-Encoding which are handled specially,

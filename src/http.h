@@ -1,6 +1,7 @@
 #ifndef __HTTP_H__
 #define __HTTP_H__
 
+#include "fork_web.h"
 #include <sys/types.h>
 
 /* Maximum URL buffer size shared across the HTTP/RTSP pipeline.
@@ -53,6 +54,7 @@ typedef struct {
   char cookie[HTTP_COOKIE_BUFFER_SIZE];     /* Cookie header value for r2h-token extraction */
   char access_control_request_method[64];   /* CORS preflight method */
   char access_control_request_headers[512]; /* CORS preflight headers */
+  fork_http_req_t fork;
   http_parse_state_t parse_state;
   int content_length;
   char *body;        /* Dynamically allocated based on Content-Length */

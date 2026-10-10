@@ -2,6 +2,7 @@
 #include "access_log.h"
 #include "embedded_web.h"
 #include "epg.h"
+#include "fork_web.h"
 #include "http.h"
 #include "m3u.h"
 #include "platform_compat.h"
@@ -932,11 +933,9 @@ int connection_route_and_start(connection_t *c) {
     }
   }
 
-  if (strip_app_path_prefix(url, internal_url_buf, sizeof(internal_url_buf)) != 0) {
-    http_send_404(c);
-    return 0;
-  }
-  url = internal_url_buf;
+  /* Fork: bare paths stay reachable when app-path-prefix is set (FORK.md) */
+  if (strip_app_path_prefix(url, internal_url_buf, sizeof(internal_url_buf)) == 0)
+    url = internal_url_buf;
 
   /* Handle CORS preflight (OPTIONS) before r2h-token check */
   if (config.cors_allow_origin && config.cors_allow_origin[0] && strcasecmp(c->http_req->method, "OPTIONS") == 0) {
@@ -1004,6 +1003,9 @@ int connection_route_and_start(connection_t *c) {
     handle_web_app_manifest(c, true);
     return 0;
   }
+
+  if (fork_web_route(c, service_path, path_len))
+    return 0;
 
   const char *status_route = config.status_page_route ? config.status_page_route : "status";
   size_t status_route_len = strlen(status_route);
@@ -1119,7 +1121,7 @@ int connection_route_and_start(connection_t *c) {
   /* Dynamic parsing for RTSP and UDPxy if needed */
   if (service == NULL) {
     if (config.udpxy) {
-      service = service_create_from_udpxy_url(internal_url_buf);
+      service = service_create_from_udpxy_url(url);
     }
   } else {
     /* Found configured service (RTP or RTSP) - merge with request query (or

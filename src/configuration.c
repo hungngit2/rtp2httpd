@@ -1,5 +1,6 @@
 #include "configuration.h"
 #include "epg.h"
+#include "fork_web.h"
 #include "http.h"
 #include "m3u.h"
 #include "service.h"
@@ -524,6 +525,9 @@ void parse_global_sec(char *line) {
     j--;
   value = strndupa(line + i, j - i);
 
+  if (fork_config_parse_global(param, value))
+    return;
+
   /* Integer parameters with command line override */
   if (strcasecmp("verbosity", param) == 0) {
     if (set_if_not_cmd_override(cmd_verbosity_set, "verbosity"))
@@ -1047,6 +1051,7 @@ void config_cleanup(bool force_free) {
 }
 
 int config_snapshot(config_t *snapshot) {
+  fork_config_snapshot();
   if (!snapshot)
     return -1;
 
@@ -1115,6 +1120,7 @@ void config_snapshot_free(config_t *snapshot) {
 void config_restore_snapshot(config_t *snapshot) {
   if (!snapshot)
     return;
+  fork_config_restore_snapshot();
 
   free_config_strings(&config, false);
   config = *snapshot;
@@ -1128,6 +1134,7 @@ void config_restore_snapshot(config_t *snapshot) {
  * Does NOT reset cmd_*_set flags (they track command line args).
  */
 void config_init(void) {
+  fork_config_init();
   /* Set numeric config values to defaults (only if not set by command line) */
   if (!cmd_verbosity_set)
     config.verbosity = LOG_ERROR;

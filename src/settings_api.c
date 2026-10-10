@@ -1,5 +1,6 @@
 #include "settings_api.h"
 #include "configuration.h"
+#include "fork_web.h"
 #include "http.h"
 #include "utils.h"
 #include <signal.h>
@@ -22,15 +23,12 @@ typedef struct {
 /* Table-driven list of every global setting exposed by /setting. Adding a
  * field here is the only change needed to expose it via GET/POST; both
  * handlers below are fully generic over this table. */
-const setting_field_t SETTING_FIELDS[] = {
+static const setting_field_t SETTING_FIELDS[] = {
     {"verbosity", FT_INT, offsetof(config_t, verbosity)},
     {"maxclients", FT_INT, offsetof(config_t, maxclients)},
     {"hostname", FT_STRING, offsetof(config_t, hostname)},
     {"xff", FT_BOOL, offsetof(config_t, xff)},
     {"r2h-token", FT_STRING, offsetof(config_t, r2h_token)},
-    {"web-auth-user", FT_STRING, offsetof(config_t, web_auth_user)},
-    {"web-auth-password", FT_STRING, offsetof(config_t, web_auth_password)},
-    {"web-auth-require-local", FT_BOOL, offsetof(config_t, web_auth_require_local)},
     {"workers", FT_INT, offsetof(config_t, workers)},
     {"buffer-pool-max-size", FT_INT, offsetof(config_t, buffer_pool_max_size)},
     {"udp-rcvbuf-size", FT_INT, offsetof(config_t, udp_rcvbuf_size)},
@@ -45,12 +43,10 @@ const setting_field_t SETTING_FIELDS[] = {
     {"video-snapshot", FT_BOOL, offsetof(config_t, video_snapshot)},
     {"status-page-path", FT_STRING, offsetof(config_t, status_page_path)},
     {"player-page-path", FT_STRING, offsetof(config_t, player_page_path)},
-    {"setting-page-path", FT_STRING, offsetof(config_t, setting_page_path)},
     {"app-path-prefix", FT_STRING, offsetof(config_t, app_path_prefix)},
     {"use-relative-path-in-m3u", FT_BOOL, offsetof(config_t, use_relative_path_in_m3u)},
     {"external-m3u", FT_STRING, offsetof(config_t, external_m3u_url)},
     {"external-m3u-update-interval", FT_INT, offsetof(config_t, external_m3u_update_interval)},
-    {"zerocopy-on-send", FT_BOOL, offsetof(config_t, zerocopy_on_send)},
     {"rtsp-stun-server", FT_STRING, offsetof(config_t, rtsp_stun_server)},
     {"http-proxy-user-agent", FT_STRING, offsetof(config_t, http_proxy_user_agent)},
     {"rtsp-user-agent", FT_STRING, offsetof(config_t, rtsp_user_agent)},
@@ -58,7 +54,18 @@ const setting_field_t SETTING_FIELDS[] = {
     {"access-log", FT_STRING, offsetof(config_t, access_log)},
     {"log-format", FT_STRING, offsetof(config_t, log_format)},
 };
-const size_t SETTING_FIELDS_COUNT = sizeof(SETTING_FIELDS) / sizeof(SETTING_FIELDS[0]);
+#define SETTING_FIELDS_COUNT (sizeof(SETTING_FIELDS) / sizeof(SETTING_FIELDS[0]))
+
+/* Fork-only keys live in fork_config, not config_t. */
+static const char *const FORK_SETTING_KEYS[] = {"setting-page-path", "web-auth-user", "web-auth-password",
+                                                "web-auth-require-local"};
+#define FORK_SETTING_KEYS_COUNT (sizeof(FORK_SETTING_KEYS) / sizeof(FORK_SETTING_KEYS[0]))
+
+/* A NULL or empty value removes the key from [global]. */
+typedef struct {
+  const char *key;
+  const char *value;
+} setting_kv_t;
 
 /* Appends a JSON-quoted, escaped copy of src to dst (which must already have
  * room). Returns the number of bytes written (not including the terminator). */
@@ -96,10 +103,9 @@ static size_t json_append_escaped_string(char *dst, size_t dst_size, const char 
 }
 
 /* Appends formatted output to a dynamically-growing buffer, reallocating as
- * needed. Returns 0 on success, -1 on formatting or allocation failure.
- * (Mirrors configuration.c's out_append; kept local since these are separate
- * translation units.) */
-static int json_out_append(char **out, size_t *out_cap, size_t *out_len, const char *fmt, ...) {
+ * needed. Returns 0 on success, -1 on formatting or allocation failure. */
+__attribute__((format(printf, 4, 5))) static int json_out_append(char **out, size_t *out_cap, size_t *out_len,
+                                                                 const char *fmt, ...) {
   va_list args;
   int needed;
 
@@ -149,6 +155,221 @@ static int json_out_ensure_cap(char **out, size_t *out_cap, size_t *out_len, siz
 }
 
 static void send_json_error(connection_t *c, int status, const char *message);
+
+/* True if `line` is an ACTIVE (non-commented) assignment for `key`. Commented
+ * example/alternative lines (starting with ';' or '#') are never matched, so
+ * they're preserved untouched as documentation. */
+static int line_is_active_key(const char *line, const char *key) {
+  const char *p = line;
+  size_t key_len = strlen(key);
+
+  while (*p == ' ' || *p == '\t')
+    p++;
+  if (*p == ';' || *p == '#')
+    return 0;
+  if (strncasecmp(p, key, key_len) != 0)
+    return 0;
+  p += key_len;
+  while (*p == ' ' || *p == '\t')
+    p++;
+  return *p == '=' || *p == '\0';
+}
+
+static int config_apply_global_settings(const char *path, const setting_kv_t *kvs, size_t n_kvs,
+                                        const char **listen_lines, size_t n_listen) {
+  char *content;
+  size_t content_len;
+  long size = 0;
+  FILE *f = fopen(path, "r");
+
+  if (f) {
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    if (size < 0) {
+      fclose(f);
+      return -1;
+    }
+    fseek(f, 0, SEEK_SET);
+    content = malloc((size_t)size + 1);
+    if (!content) {
+      fclose(f);
+      return -1;
+    }
+    if (fread(content, 1, (size_t)size, f) != (size_t)size) {
+      fclose(f);
+      free(content);
+      return -1;
+    }
+    content[size] = '\0';
+    content_len = (size_t)size;
+    fclose(f);
+  } else {
+    content = strdup("[global]\n");
+    if (!content)
+      return -1;
+    content_len = strlen(content);
+  }
+
+  int *applied = calloc(n_kvs > 0 ? n_kvs : 1, sizeof(int));
+  if (!applied) {
+    free(content);
+    return -1;
+  }
+
+  size_t out_cap = (size_t)size + 65536;
+  char *out = malloc(out_cap);
+  if (!out) {
+    free(content);
+    free(applied);
+    return -1;
+  }
+  size_t out_len = 0;
+
+/* All OUT_APPEND call sites below run before `content`/`applied` are freed,
+ * so the cleanup is identical everywhere. */
+#define OUT_APPEND(...)                                                                                                \
+  do {                                                                                                                 \
+    if (json_out_append(&out, &out_cap, &out_len, __VA_ARGS__) != 0) {                                                 \
+      free(content);                                                                                                   \
+      free(applied);                                                                                                   \
+      free(out);                                                                                                       \
+      return -1;                                                                                                       \
+    }                                                                                                                  \
+  } while (0)
+
+  int in_global = 0, in_bind = 0, has_global = 0, has_bind = 0;
+  /* Manual line splitting (not strtok_r): strtok_r treats runs of
+   * consecutive delimiters as one, silently dropping blank lines, which
+   * would violate byte-for-byte preservation of the rest of the file. */
+  char *content_end = content + content_len;
+  char *line = content;
+
+  while (line < content_end) {
+    char *next_nl = strchr(line, '\n');
+    if (next_nl)
+      *next_nl = '\0';
+
+    const char *t = line;
+    while (*t == ' ' || *t == '\t')
+      t++;
+
+    if (t[0] == '[') {
+      if (in_global) {
+        for (size_t i = 0; i < n_kvs; i++) {
+          if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
+            OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
+            applied[i] = 1;
+          }
+        }
+      }
+      if (in_bind) {
+        for (size_t i = 0; i < n_listen; i++)
+          OUT_APPEND("%s\n", listen_lines[i]);
+        if (n_listen == 0)
+          OUT_APPEND("* 5140\n");
+      }
+
+      in_global = strncasecmp(t, "[global]", 8) == 0;
+      in_bind = strncasecmp(t, "[bind]", 6) == 0;
+      if (in_global)
+        has_global = 1;
+      if (in_bind)
+        has_bind = 1;
+
+      OUT_APPEND("%s\n", line);
+      line = next_nl ? next_nl + 1 : content_end;
+      continue;
+    }
+
+    if (in_bind) {
+      line = next_nl ? next_nl + 1 : content_end;
+      continue;
+    }
+
+    if (in_global) {
+      int matched = 0;
+      for (size_t i = 0; i < n_kvs; i++) {
+        if (line_is_active_key(t, kvs[i].key)) {
+          matched = 1;
+          if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
+            OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
+          }
+          applied[i] = 1;
+          break;
+        }
+      }
+      if (matched) {
+        line = next_nl ? next_nl + 1 : content_end;
+        continue;
+      }
+    }
+
+    OUT_APPEND("%s\n", line);
+    line = next_nl ? next_nl + 1 : content_end;
+  }
+
+  if (in_global) {
+    for (size_t i = 0; i < n_kvs; i++) {
+      if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
+        OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
+        applied[i] = 1;
+      }
+    }
+  }
+  if (in_bind) {
+    for (size_t i = 0; i < n_listen; i++)
+      OUT_APPEND("%s\n", listen_lines[i]);
+    if (n_listen == 0)
+      OUT_APPEND("* 5140\n");
+  }
+
+  if (!has_global) {
+    OUT_APPEND("[global]\n");
+    for (size_t i = 0; i < n_kvs; i++) {
+      if (!applied[i] && kvs[i].value && kvs[i].value[0]) {
+        OUT_APPEND("%s = %s\n", kvs[i].key, kvs[i].value);
+        applied[i] = 1;
+      }
+    }
+  }
+
+  if (!has_bind) {
+    OUT_APPEND("[bind]\n");
+    for (size_t i = 0; i < n_listen; i++)
+      OUT_APPEND("%s\n", listen_lines[i]);
+    if (n_listen == 0)
+      OUT_APPEND("* 5140\n");
+  }
+
+#undef OUT_APPEND
+
+  free(content);
+  free(applied);
+
+  char tmp_path[1024];
+  snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+  FILE *out_f = fopen(tmp_path, "w");
+  if (!out_f) {
+    free(out);
+    return -1;
+  }
+  size_t written = fwrite(out, 1, out_len, out_f);
+  fflush(out_f);
+  fsync(fileno(out_f));
+  fclose(out_f);
+  free(out);
+
+  if (written != out_len) {
+    unlink(tmp_path);
+    return -1;
+  }
+  if (rename(tmp_path, path) != 0) {
+    unlink(tmp_path);
+    return -1;
+  }
+
+  return 0;
+}
 
 /* Renders a single bind_addresses entry as the canonical string form used by
  * both the GET response and the "listen" form field (bare port, host:port,
@@ -216,17 +437,20 @@ void handle_get_config(connection_t *c) {
 
     switch (f->type) {
     case FT_INT: {
-      int v = *(const int *)(base + f->offset);
+      int v;
+      memcpy(&v, base + f->offset, sizeof(v));
       GC_APPEND("%d", v);
       break;
     }
     case FT_BOOL: {
-      int v = *(const int *)(base + f->offset);
+      int v;
+      memcpy(&v, base + f->offset, sizeof(v));
       GC_APPEND("%s", v ? "true" : "false");
       break;
     }
     case FT_STRING: {
-      const char *v = *(const char *const *)(base + f->offset);
+      const char *v;
+      memcpy(&v, base + f->offset, sizeof(v));
       GC_APPEND_ESCAPED(v ? v : "");
       break;
     }
@@ -237,6 +461,14 @@ void handle_get_config(connection_t *c) {
     }
     }
   }
+
+  GC_APPEND(",\"setting-page-path\":");
+  GC_APPEND_ESCAPED(fork_config.setting_page_path ? fork_config.setting_page_path : "");
+  GC_APPEND(",\"web-auth-user\":");
+  GC_APPEND_ESCAPED(fork_config.web_auth_user ? fork_config.web_auth_user : "");
+  GC_APPEND(",\"web-auth-password\":");
+  GC_APPEND_ESCAPED(fork_config.web_auth_password ? fork_config.web_auth_password : "");
+  GC_APPEND(",\"web-auth-require-local\":%s", fork_config.web_auth_require_local ? "true" : "false");
 
   /* fcc-listen-port-range: combine the two int fields into "start-end" */
   {
@@ -278,6 +510,29 @@ void handle_get_config(connection_t *c) {
  * INI format or let a form field inject extra config lines. */
 static int value_has_newline(const char *value) { return value && strpbrk(value, "\r\n") != NULL; }
 
+/* The form uses get-config's "host:port" / "[v6]:port" / bare-port notation, but
+ * [bind] lines are "<node> <service>". Returns 0 on success, -1 if malformed. */
+static int listen_to_bind_line(const char *listen, char *out, size_t out_size) {
+  const char *colon;
+  int written;
+
+  if (listen[0] == '/' || strpbrk(listen, " \t")) {
+    written = snprintf(out, out_size, "%s", listen);
+  } else if (listen[0] == '[') {
+    const char *close = strchr(listen, ']');
+    if (!close || close[1] != ':' || close[2] == '\0')
+      return -1;
+    written = snprintf(out, out_size, "%.*s %s", (int)(close - listen - 1), listen + 1, close + 2);
+  } else if ((colon = strchr(listen, ':')) != NULL) {
+    if (strchr(colon + 1, ':') || colon == listen || colon[1] == '\0')
+      return -1;
+    written = snprintf(out, out_size, "%.*s %s", (int)(colon - listen), listen, colon + 1);
+  } else {
+    written = snprintf(out, out_size, "* %s", listen);
+  }
+  return (written >= 0 && (size_t)written < out_size) ? 0 : -1;
+}
+
 static void send_json_error(connection_t *c, int status, const char *message) {
   char response[256];
   send_http_headers(c, status, "application/json", NULL);
@@ -286,11 +541,11 @@ static void send_json_error(connection_t *c, int status, const char *message) {
 }
 
 void handle_save_config(connection_t *c) {
-  if (strcasecmp(c->http_req.method, "POST") != 0) {
+  if (strcasecmp(c->http_req->method, "POST") != 0) {
     send_json_error(c, STATUS_400, "Method not allowed. Use POST");
     return;
   }
-  if (c->http_req.body_len == 0) {
+  if (c->http_req->body_len == 0) {
     send_json_error(c, STATUS_400, "Missing request body");
     return;
   }
@@ -304,13 +559,13 @@ void handle_save_config(connection_t *c) {
   /* +1 slot for fcc-listen-port-range, which isn't in SETTING_FIELDS because
    * it maps to two separate config_t ints (fcc_listen_port_min/max) rather
    * than one. */
-  setting_kv_t kvs[SETTING_FIELDS_COUNT + 1];
-  char value_bufs[SETTING_FIELDS_COUNT + 1][512];
+  setting_kv_t kvs[SETTING_FIELDS_COUNT + 1 + FORK_SETTING_KEYS_COUNT];
+  char value_bufs[SETTING_FIELDS_COUNT + 1 + FORK_SETTING_KEYS_COUNT][512];
   size_t n_kvs = 0;
 
   for (size_t i = 0; i < SETTING_FIELDS_COUNT; i++) {
     const setting_field_t *f = &SETTING_FIELDS[i];
-    if (http_parse_query_param(c->http_req.body, f->config_key, value_bufs[n_kvs], sizeof(value_bufs[n_kvs])) == 0) {
+    if (http_parse_query_param(c->http_req->body, f->config_key, value_bufs[n_kvs], sizeof(value_bufs[n_kvs])) == 0) {
       if (value_has_newline(value_bufs[n_kvs])) {
         send_json_error(c, STATUS_400, "Field value must not contain newlines");
         return;
@@ -320,8 +575,20 @@ void handle_save_config(connection_t *c) {
       n_kvs++;
     }
   }
-  if (http_parse_query_param(c->http_req.body, "fcc-listen-port-range", value_bufs[n_kvs], sizeof(value_bufs[n_kvs])) ==
-      0) {
+  for (size_t i = 0; i < FORK_SETTING_KEYS_COUNT; i++) {
+    if (http_parse_query_param(c->http_req->body, FORK_SETTING_KEYS[i], value_bufs[n_kvs], sizeof(value_bufs[n_kvs])) ==
+        0) {
+      if (value_has_newline(value_bufs[n_kvs])) {
+        send_json_error(c, STATUS_400, "Field value must not contain newlines");
+        return;
+      }
+      kvs[n_kvs].key = FORK_SETTING_KEYS[i];
+      kvs[n_kvs].value = value_bufs[n_kvs];
+      n_kvs++;
+    }
+  }
+  if (http_parse_query_param(c->http_req->body, "fcc-listen-port-range", value_bufs[n_kvs],
+                             sizeof(value_bufs[n_kvs])) == 0) {
     if (value_has_newline(value_bufs[n_kvs])) {
       send_json_error(c, STATUS_400, "Field value must not contain newlines");
       return;
@@ -335,10 +602,11 @@ void handle_save_config(connection_t *c) {
    * repeated form field, since this codebase's query-param parser only
    * returns the first match for a given key). */
   char listen_raw[4096];
+  char listen_bufs[64][320];
   const char *listen_lines[64];
   size_t n_listen = 0;
 
-  if (http_parse_query_param(c->http_req.body, "listen", listen_raw, sizeof(listen_raw)) == 0) {
+  if (http_parse_query_param(c->http_req->body, "listen", listen_raw, sizeof(listen_raw)) == 0) {
     char *saveptr = NULL;
     char *line = strtok_r(listen_raw, "\n", &saveptr);
     while (line && n_listen < 64) {
@@ -352,7 +620,12 @@ void handle_save_config(connection_t *c) {
           send_json_error(c, STATUS_400, "Field value must not contain newlines");
           return;
         }
-        listen_lines[n_listen++] = line;
+        if (listen_to_bind_line(line, listen_bufs[n_listen], sizeof(listen_bufs[n_listen])) != 0) {
+          send_json_error(c, STATUS_400, "Invalid listen address");
+          return;
+        }
+        listen_lines[n_listen] = listen_bufs[n_listen];
+        n_listen++;
       }
       line = strtok_r(NULL, "\n", &saveptr);
     }

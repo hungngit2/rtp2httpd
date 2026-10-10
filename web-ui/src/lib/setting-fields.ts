@@ -98,7 +98,6 @@ export const SETTING_FIELDS: SettingField[] = [
     labelKey: "fccListenPortRange",
     placeholder: "40000-40100",
   },
-  { key: "zerocopy-on-send", tab: "network", type: "checkbox", labelKey: "zerocopyOnSend" },
   { key: "rtsp-stun-server", tab: "network", type: "text", labelKey: "rtspStunServer", placeholder: "stun.miwifi.com" },
   {
     key: "external-m3u",

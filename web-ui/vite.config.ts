@@ -20,6 +20,7 @@ export default defineConfig(({ mode }) => {
         input: {
           status: resolve(import.meta.dirname, "status.html"),
           player: resolve(import.meta.dirname, "player.html"),
+          setting: resolve(import.meta.dirname, "setting.html"),
         },
       },
     },
