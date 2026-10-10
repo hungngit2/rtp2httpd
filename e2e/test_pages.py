@@ -407,16 +407,8 @@ class TestAppPathPrefix:
         if status == 200:
             assert "event-stream" in hdrs.get("content-type", "")
 
-    @pytest.mark.parametrize(
-        "path",
-        [
-            "/status",
-            "/player",
-            "/assets/icon-192.png",
-            "/playlist.m3u",
-            "/app/rtp2httpd2/status",
-        ],
-    )
+    # Fork: bare paths stay reachable with app-path-prefix (FORK.md)
+    @pytest.mark.parametrize("path", ["/app/rtp2httpd2/status"])
     def test_unprefixed_or_boundary_mismatch_routes_404(self, prefixed_r2h, path):
         status, _, _ = http_get("127.0.0.1", prefixed_r2h.port, path)
         assert status == 404
