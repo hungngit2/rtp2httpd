@@ -213,7 +213,8 @@ get_release_asset_name() {
 
     release_json=$(curl -fsSL "${GITHUB_API}/releases/tags/${version}" 2>/dev/null || true)
 
-    asset_name=$(printf '%s\n' "$release_json" | grep -o '"name": "[^"]*"' | sed 's/.*"name": "\([^"]*\)"/\1/' | grep -E "^rtp2httpd-.*-${arch}$" | head -n 1 || true)
+    # Exact match: a loose "-${arch}$" pattern also matches freebsd*/macos-* builds.
+    asset_name=$(printf '%s\n' "$release_json" | grep -o '"name": "[^"]*"' | sed 's/.*"name": "\([^"]*\)"/\1/' | grep -Fx "rtp2httpd-${version#v}-${arch}" | head -n 1 || true)
 
     if [ -n "$asset_name" ]; then
         echo "$asset_name"
